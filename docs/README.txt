@@ -1,3 +1,5 @@
+![GitHub All Releases](https://shields.io)
+
 한국어 TTS - 웹 버전 (GitHub Pages)
 ====================================
 
