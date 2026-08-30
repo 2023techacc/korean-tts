@@ -1,4 +1,5 @@
-# Korean TTS
+# Korean TTS [![Download](https://img.shields.io/github/v/release/2023techacc/korean-tts?include_prereleases&label=Download&color=blue)](https://github.com/2023techacc/korean-tts/releases/latest)
+
 
 Turns Korean text into speech by looking up recorded syllable pieces (`sound/*.wav`, 268 files) and concatenating them — no TTS model, no cloud API, no external dependencies beyond the Python/Kotlin/JS standard runtime. A hand-written phonology engine rewrites the input first (liaison, nasalization, liquid assimilation, aspiration, tensification, final-consonant neutralization) so e.g. `국물이` is spoken as `궁무리`, not read literally.
 
