@@ -1,9 +1,23 @@
 .env
 __pycache__/
 *.pyc
-data/players.json
 _backup/
 *.zip
+
+# Discord bot (Pokemon RPG / music / school-info) - not part of the TTS work
+# this repo now tracks. Left on disk to keep running locally, just untracked.
+.env.example
+README.txt
+bot.py
+main.py
+pokemon_bot.py
+pokemon.json
+requirements.txt
+voicetest.py
+music/
+pokemon_bot/
+utils/
+data/
 
 # Built by PyInstaller (see BUILD_EXE.txt) - distributed via GitHub Releases,
 # not committed; rebuild locally with the command in BUILD_EXE.txt.
