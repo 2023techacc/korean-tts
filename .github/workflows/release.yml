@@ -1,0 +1,98 @@
+name: Release
+
+# Builds KoreanTTS.exe and the Android debug APK and attaches them to a
+# GitHub Release, so a release is "push a tag" instead of "rebuild both by
+# hand and drag files onto the Releases page" (see BUILD_EXE.txt /
+# KoreanTTS-Android/README.txt for what this automates).
+#
+# Two ways to run it:
+#   - Push a tag matching v* (e.g. `git tag v1.1.0 && git push origin v1.1.0`)
+#   - Actions tab -> Release -> Run workflow, typing a tag name (e.g. v1.1.0) -
+#     this creates that tag too, pointed at whichever branch you ran it from.
+#
+# The release is created as a draft so you can check the attached files and
+# edit the notes before anyone sees it - publish it manually from the
+# Releases page when you're happy with it.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Tag to build and release (e.g. v1.1.0)"
+        required: true
+
+jobs:
+  build-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyInstaller
+        run: py -m pip install pyinstaller
+
+      - name: Build KoreanTTS.exe
+        working-directory: Allinone (2)
+        shell: pwsh
+        run: |
+          $soundAbs = (Resolve-Path "sound").Path
+          py -m PyInstaller --onefile --windowed --name KoreanTTS `
+            --add-data "$soundAbs;sound" `
+            --distpath . --workpath build_temp --specpath build_temp `
+            --noconfirm gui.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KoreanTTS-exe
+          path: Allinone (2)/KoreanTTS.exe
+          if-no-files-found: error
+
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Build debug APK
+        working-directory: KoreanTTS-Android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --console=plain
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KoreanTTS-apk
+          path: KoreanTTS-Android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+  release:
+    needs: [build-exe, build-apk]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag_name || github.ref_name }}
+          draft: true
+          generate_release_notes: true
+          files: |
+            artifacts/KoreanTTS-exe/KoreanTTS.exe
+            artifacts/KoreanTTS-apk/app-debug.apk
