@@ -1,0 +1,837 @@
+"""Korean TTS desktop app - text entry + playback controls, plus a
+per-sample fine-tuning panel for the sound/ library. Packaged into a
+standalone .exe via PyInstaller (see BUILD_EXE.txt); run directly with
+`py gui.py` otherwise. Pure standard library (tkinter ships with Python).
+
+Same engine as tts.py/main.py (korean_tts.py) - nothing here duplicates the
+phonology or audio pipeline, only the UI and the fine-tuning overrides file
+that pipeline already knows how to consume (see korean_tts.load_overrides).
+"""
+
+import io
+import json
+import os
+import sys
+import tempfile
+import threading
+import tkinter as tk
+import wave
+from tkinter import filedialog, messagebox, ttk
+
+import korean_tts as ktts
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# When packaged by PyInstaller (--onefile), bundled data (sound/) is
+# extracted fresh into a temp dir (sys._MEIPASS) on every launch — writing
+# settings/overrides there would silently lose them every run. Read-only
+# bundled assets come from _MEIPASS when frozen; anything this app writes
+# goes next to the .exe itself instead, which persists across runs. Running
+# as a plain script (not frozen) keeps the original "next to gui.py" layout.
+if getattr(sys, "frozen", False):
+    RESOURCE_DIR = getattr(sys, "_MEIPASS", BASE_DIR)
+    WRITABLE_DIR = os.path.dirname(sys.executable)
+else:
+    RESOURCE_DIR = BASE_DIR
+    WRITABLE_DIR = BASE_DIR
+
+SOUND_DIR = os.path.join(RESOURCE_DIR, "sound")
+OVERRIDES_PATH = os.path.join(WRITABLE_DIR, ktts.DEFAULT_OVERRIDES_FILENAME)
+SETTINGS_PATH = os.path.join(WRITABLE_DIR, "gui_settings.json")
+
+
+# ------------------------------------------------------
+# Non-blocking playback
+# ------------------------------------------------------
+
+class Player:
+    """Plays WAV bytes without freezing the UI thread.
+
+    Windows uses winsound's async mode - but PlaySound raises
+    "Cannot play asynchronously from memory" if you combine SND_MEMORY with
+    SND_ASYNC (confirmed by actually calling it, not just from docs), so
+    async playback has to go through a temp file instead. The temp file
+    can't be deleted immediately after starting playback (Windows is still
+    reading it); it's cleaned up lazily on the next play()/stop() instead,
+    by which point PURGE has stopped the previous playback and released it.
+    Elsewhere, the existing blocking korean_tts.play() runs on a background
+    thread instead.
+    """
+
+    def __init__(self):
+        self._token = 0  # bumped on every play()/stop() so a stale timer's on_done is ignored
+        self._temp_path = None
+
+    def play(self, wav_bytes: bytes, on_done=None):
+        self.stop()
+        self._token += 1
+        token = self._token
+
+        if sys.platform == "win32":
+            import winsound
+            fd, path = tempfile.mkstemp(suffix=".wav", prefix="ktts_")
+            with os.fdopen(fd, "wb") as f:
+                f.write(wav_bytes)
+            self._temp_path = path
+            winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            if on_done:
+                with wave.open(io.BytesIO(wav_bytes)) as w:
+                    duration = w.getnframes() / w.getframerate()
+                threading.Thread(target=self._notify_after, args=(duration, token, on_done), daemon=True).start()
+        else:
+            threading.Thread(target=self._play_blocking, args=(wav_bytes, token, on_done), daemon=True).start()
+
+    def _notify_after(self, duration, token, on_done):
+        threading.Event().wait(duration)
+        if token == self._token:
+            on_done()
+
+    def _play_blocking(self, wav_bytes, token, on_done):
+        try:
+            ktts.play(wav_bytes)
+        except ktts.AudioError:
+            pass
+        if token == self._token and on_done:
+            on_done()
+
+    def stop(self):
+        self._token += 1  # invalidate any pending _notify_after
+        if sys.platform == "win32":
+            import winsound
+            winsound.PlaySound(None, winsound.SND_PURGE)
+            if self._temp_path and os.path.exists(self._temp_path):
+                try:
+                    os.remove(self._temp_path)
+                except OSError:
+                    pass  # still locked somehow; harmless leftover in the OS temp dir
+                self._temp_path = None
+
+
+# ------------------------------------------------------
+# Persisted GUI settings (speed/gap/volume/stop-gap sliders)
+# ------------------------------------------------------
+
+DEFAULT_SETTINGS = {"speed": 1.0, "gap_ms": 300, "volume": 1.0, "stop_gap_ms": ktts.DEFAULT_STOP_GAP_MS}
+
+
+def load_settings() -> dict:
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {**DEFAULT_SETTINGS, **data}
+    except (OSError, ValueError):
+        pass
+    return dict(DEFAULT_SETTINGS)
+
+
+def save_settings(settings: dict) -> None:
+    try:
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+    except OSError:
+        pass
+
+
+# ------------------------------------------------------
+# Main window
+# ------------------------------------------------------
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("한국어 TTS")
+        self.geometry("900x760")
+
+        self.player = Player()
+        self.settings = load_settings()
+        self.overrides = ktts.load_overrides(OVERRIDES_PATH)
+
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill="both", expand=True, padx=8, pady=8)
+
+        self.main_tab = MainTab(notebook, self)
+        self.tuning_tab = TuningTab(notebook, self)
+        self.batch_tab = BatchTab(notebook, self)
+        notebook.add(self.main_tab, text="재생")
+        notebook.add(self.tuning_tab, text="고급 설정 (음성 조각별 미세조정)")
+        notebook.add(self.batch_tab, text="일괄 변환")
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        self.player.stop()
+        save_settings(self.settings)
+        self.destroy()
+
+
+class MainTab(ttk.Frame):
+    def __init__(self, parent, app: App):
+        super().__init__(parent)
+        self.app = app
+        self._last_track = None  # last built samples, for :save-equivalent without rebuilding
+
+        ttk.Label(self, text="읽을 한국어를 입력하세요").pack(anchor="w", padx=8, pady=(8, 0))
+        self.text_box = tk.Text(self, height=5, wrap="word")
+        self.text_box.pack(fill="x", padx=8, pady=4)
+
+        btn_row = ttk.Frame(self)
+        btn_row.pack(fill="x", padx=8, pady=4)
+        ttk.Button(btn_row, text="재생", command=self.on_play).pack(side="left", padx=(0, 4))
+        ttk.Button(btn_row, text="정지", command=self.app.player.stop).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="발음 보기", command=self.on_show_pronunciation).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="WAV로 저장", command=self.on_save).pack(side="left", padx=4)
+
+        self.pron_label = ttk.Label(self, text="", wraplength=600, foreground="#555")
+        self.pron_label.pack(anchor="w", padx=8, pady=(0, 8))
+
+        sliders = ttk.LabelFrame(self, text="설정")
+        sliders.pack(fill="x", padx=8, pady=8)
+
+        s = self.app.settings
+        self.speed_var = self._add_slider(sliders, "재생 속도", s["speed"], ktts.MIN_SPEED, ktts.MAX_SPEED,
+                                           fmt=lambda v: f"{v:.2f}x", key="speed")
+        self.gap_var = self._add_slider(sliders, "띄어쓰기 간격", s["gap_ms"], 0, 800,
+                                         fmt=lambda v: f"{int(v)}ms", key="gap_ms")
+        self.volume_var = self._add_slider(sliders, "볼륨", s["volume"] * 100, 0, 100,
+                                            fmt=lambda v: f"{int(v)}%", key="volume", scale=0.01)
+        self.stop_gap_var = self._add_slider(sliders, "받침 ㄱㄷㅂ 뒤 간격", s["stop_gap_ms"], 0, 200,
+                                              fmt=lambda v: f"{int(v)}ms", key="stop_gap_ms")
+
+        note = ("다른 프로그램에서도 쓰려면: tts.py 는 같은 설정을 --speed/--gap/"
+                "--stop-gap 플래그로 받고, 고급 설정 탭에서 저장한 음성 조각별 "
+                "미세조정은 자동으로 같이 적용됩니다.")
+        ttk.Label(self, text=note, wraplength=600, foreground="#888").pack(anchor="w", padx=8, pady=4)
+
+    def _add_slider(self, parent, label, value, lo, hi, fmt, key, scale=1.0):
+        row = ttk.Frame(parent)
+        row.pack(fill="x", padx=8, pady=4)
+        text_var = tk.StringVar(value=f"{label}: {fmt(value)}")
+        ttk.Label(row, textvariable=text_var, width=26).pack(side="left")
+        var = tk.DoubleVar(value=value)
+
+        def on_change(_evt=None):
+            v = var.get()
+            text_var.set(f"{label}: {fmt(v)}")
+            self.app.settings[key] = v * scale if scale != 1.0 else v
+
+        scale_widget = ttk.Scale(row, from_=lo, to=hi, orient="horizontal", variable=var, command=lambda _v: on_change())
+        scale_widget.pack(side="left", fill="x", expand=True, padx=8)
+        return var
+
+    def current_text(self) -> str:
+        return self.text_box.get("1.0", "end").strip()
+
+    def on_show_pronunciation(self):
+        text = self.current_text()
+        if not text:
+            return
+        self.pron_label.config(text=f"발음: {ktts.text_to_pronunciation(text)}")
+
+    def _build(self, text: str):
+        groups = ktts.text_to_groups(text)
+        return ktts.build_audio(
+            groups, SOUND_DIR,
+            gap_ms=int(self.app.settings["gap_ms"]),
+            stop_gap_ms=int(self.app.settings["stop_gap_ms"]),
+            speed=self.app.settings["speed"],
+            overrides=self.app.overrides,
+        )
+
+    def on_play(self):
+        text = self.current_text()
+        if not text:
+            return
+
+        def work():
+            track, missing = self._build(text)
+            if not len(track):
+                self.after(0, lambda: messagebox.showinfo("한국어 TTS", "읽을 수 있는 한글이 없습니다."))
+                return
+            wav_bytes = ktts.to_wav_bytes(track)
+            volume = self.app.settings["volume"]
+            if volume < 1.0:
+                wav_bytes = _scale_wav_volume(wav_bytes, volume)
+            self.app.player.play(wav_bytes)
+            if missing:
+                names = ", ".join(sorted(set(missing)))
+                self.after(0, lambda: messagebox.showwarning("한국어 TTS", f"음성 조각을 찾지 못해 건너뜀: {names}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_save(self):
+        text = self.current_text()
+        if not text:
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".wav", filetypes=[("WAV", "*.wav")])
+        if not path:
+            return
+
+        def work():
+            track, missing = self._build(text)
+            if not len(track):
+                self.after(0, lambda: messagebox.showinfo("한국어 TTS", "읽을 수 있는 한글이 없습니다."))
+                return
+            wav_bytes = ktts.to_wav_bytes(track)
+            volume = self.app.settings["volume"]
+            if volume < 1.0:
+                wav_bytes = _scale_wav_volume(wav_bytes, volume)
+            with open(path, "wb") as f:
+                f.write(wav_bytes)
+            self.after(0, lambda: messagebox.showinfo("한국어 TTS", f"저장됨: {path}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+
+def _scale_wav_volume(wav_bytes: bytes, volume: float) -> bytes:
+    """Apply the volume slider (0..1) to a rendered WAV blob for playback/export."""
+    with wave.open(io.BytesIO(wav_bytes)) as w:
+        raw = w.readframes(w.getnframes())
+    import array
+    samples = array.array("h")
+    samples.frombytes(raw)
+    samples = array.array("h", (max(-32768, min(32767, int(x * volume))) for x in samples))
+    return ktts.to_wav_bytes(samples)
+
+
+# ------------------------------------------------------
+# Fine-tuning tab
+# ------------------------------------------------------
+
+class WaveformEditor(tk.Canvas):
+    """Visual trim editor: draws the sample's waveform with the trimmed-away
+    start/end regions shaded out, and lets the user drag either edge marker
+    directly instead of guessing millisecond values on a blind slider.
+    """
+
+    WIDTH = 460
+    HEIGHT = 100
+    MIN_GAP_MS = 20  # never let the two markers cross closer than this
+
+    def __init__(self, parent, on_drag):
+        super().__init__(parent, width=self.WIDTH, height=self.HEIGHT, background="#1e1e1e", highlightthickness=1,
+                          highlightbackground="#888")
+        self.on_drag = on_drag  # callback(start_ms, end_ms)
+        self.peaks = []
+        self.duration_ms = 0.0
+        self.trim_start_ms = 0.0
+        self.trim_end_ms = 0.0
+        self._dragging = None
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<B1-Motion>", self._on_motion)
+
+    def load(self, samples):
+        n = len(samples)
+        self.duration_ms = (n / ktts.TARGET_RATE) * 1000 if n else 0.0
+        width = self.WIDTH
+        peaks = []
+        for x in range(width):
+            start = n * x // width
+            end = max(start + 1, n * (x + 1) // width)
+            chunk = samples[start:end]
+            peaks.append(max((abs(v) for v in chunk), default=0))
+        self.peaks = peaks
+
+    def set_trim(self, start_ms, end_ms):
+        self.trim_start_ms = start_ms
+        self.trim_end_ms = end_ms
+        self.redraw()
+
+    def redraw(self):
+        self.delete("all")
+        if not self.peaks or self.duration_ms <= 0:
+            self.create_text(self.WIDTH // 2, self.HEIGHT // 2, text="(선택 없음)", fill="#888")
+            return
+
+        px_start = self._ms_to_px(self.trim_start_ms)
+        px_end = self._ms_to_px(max(self.trim_start_ms, self.duration_ms - self.trim_end_ms))
+
+        self.create_rectangle(0, 0, px_start, self.HEIGHT, fill="#3a1e1e", outline="")
+        self.create_rectangle(px_end, 0, self.WIDTH, self.HEIGHT, fill="#3a1e1e", outline="")
+        self.create_rectangle(px_start, 0, px_end, self.HEIGHT, fill="#1e2e1e", outline="")
+
+        mid = self.HEIGHT // 2
+        scale = (self.HEIGHT / 2 - 4) / 32768
+        for x, peak in enumerate(self.peaks):
+            h = peak * scale
+            self.create_line(x, mid - h, x, mid + h, fill="#6fcf97")
+
+        self.create_line(px_start, 0, px_start, self.HEIGHT, fill="#4d84ff", width=2)
+        self.create_line(px_end, 0, px_end, self.HEIGHT, fill="#4d84ff", width=2)
+        self.create_rectangle(px_start - 4, 0, px_start + 4, 10, fill="#4d84ff", outline="")
+        self.create_rectangle(px_end - 4, 0, px_end + 4, 10, fill="#4d84ff", outline="")
+
+    def _ms_to_px(self, ms):
+        return max(0, min(self.WIDTH, (ms / self.duration_ms) * self.WIDTH)) if self.duration_ms else 0
+
+    def _px_to_ms(self, px):
+        return max(0.0, min(self.duration_ms, (px / self.WIDTH) * self.duration_ms))
+
+    def _on_press(self, event):
+        if not self.duration_ms:
+            return
+        px_start = self._ms_to_px(self.trim_start_ms)
+        px_end = self._ms_to_px(self.duration_ms - self.trim_end_ms)
+        self._dragging = "start" if abs(event.x - px_start) <= abs(event.x - px_end) else "end"
+        self._on_motion(event)
+
+    def _on_motion(self, event):
+        if not self._dragging or not self.duration_ms:
+            return
+        ms = self._px_to_ms(event.x)
+        if self._dragging == "start":
+            max_start = max(0.0, self.duration_ms - self.trim_end_ms - self.MIN_GAP_MS)
+            self.trim_start_ms = max(0.0, min(ms, max_start))
+        else:
+            end_ms = self.duration_ms - ms
+            max_end = max(0.0, self.duration_ms - self.trim_start_ms - self.MIN_GAP_MS)
+            self.trim_end_ms = max(0.0, min(end_ms, max_end))
+        self.redraw()
+        self.on_drag(self.trim_start_ms, self.trim_end_ms)
+
+
+class TuningTab(ttk.Frame):
+    """Per-sample overrides, layered on top of the automatic trim+normalize
+    pipeline (see korean_tts.apply_override / build_audio). Saved to
+    sound_overrides.json, which tts.py/main.py/this GUI all read the same
+    way, so a fix made here benefits every interface immediately.
+
+    Beyond gain/trim, this also exposes the per-sample join-timing overrides
+    build_audio understands (crossfade_ms / coda_max_ms / stop_gap_ms) via
+    an enable checkbox next to each slider — unchecked means "don't write
+    this key at all", so the automatic/global behavior still applies.
+    """
+
+    def __init__(self, parent, app: App):
+        super().__init__(parent)
+        self.app = app
+        self.current_name = None
+        self._raw_cache = {}  # name -> undamped samples (post auto-trim/normalize), for waveform + A/B preview
+
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=8, pady=8)
+        ttk.Label(top, text="검색:").pack(side="left")
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *_: self._refresh_list())
+        ttk.Entry(top, textvariable=self.search_var).pack(side="left", fill="x", expand=True, padx=8)
+        ttk.Button(top, text="내보내기...", command=self._export).pack(side="left", padx=(8, 0))
+        ttk.Button(top, text="가져오기...", command=self._import).pack(side="left", padx=(4, 0))
+
+        body = ttk.Frame(self)
+        body.pack(fill="both", expand=True, padx=8, pady=4)
+
+        list_frame = ttk.Frame(body)
+        list_frame.pack(side="left", fill="both", expand=True)
+        self.listbox = tk.Listbox(list_frame)
+        self.listbox.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(list_frame, command=self.listbox.yview)
+        scrollbar.pack(side="left", fill="y")
+        self.listbox.config(yscrollcommand=scrollbar.set)
+        self.listbox.bind("<<ListboxSelect>>", self._on_select)
+
+        detail = ttk.LabelFrame(body, text="선택한 음성 조각")
+        detail.pack(side="left", fill="y", padx=(8, 0))
+
+        self.name_label = ttk.Label(detail, text="(선택 없음)", font=("", 11, "bold"))
+        self.name_label.pack(anchor="w", padx=8, pady=8)
+
+        ttk.Label(detail, text="파형 (드래그해서 자르기 구간 조절)").pack(anchor="w", padx=8)
+        self.waveform = WaveformEditor(detail, on_drag=self._on_waveform_drag)
+        self.waveform.pack(padx=8, pady=(0, 8))
+        self.waveform.redraw()
+
+        self.gain_var = tk.DoubleVar(value=0.0)
+        self.gain_text = tk.StringVar(value="음량 보정: 0.0dB")
+        ttk.Label(detail, textvariable=self.gain_text).pack(anchor="w", padx=8)
+        ttk.Scale(detail, from_=-12, to=12, orient="horizontal", variable=self.gain_var,
+                  command=self._on_gain_change, length=300).pack(padx=8, pady=4, fill="x")
+
+        self.trim_start_var = tk.DoubleVar(value=0.0)
+        self.trim_start_text = tk.StringVar(value="시작 자르기: 0ms")
+        ttk.Label(detail, textvariable=self.trim_start_text).pack(anchor="w", padx=8)
+        ttk.Scale(detail, from_=0, to=200, orient="horizontal", variable=self.trim_start_var,
+                  command=self._on_trim_start_change, length=300).pack(padx=8, pady=4, fill="x")
+
+        self.trim_end_var = tk.DoubleVar(value=0.0)
+        self.trim_end_text = tk.StringVar(value="끝 자르기: 0ms")
+        ttk.Label(detail, textvariable=self.trim_end_text).pack(anchor="w", padx=8)
+        ttk.Scale(detail, from_=0, to=200, orient="horizontal", variable=self.trim_end_var,
+                  command=self._on_trim_end_change, length=300).pack(padx=8, pady=4, fill="x")
+
+        adv = ttk.LabelFrame(detail, text="고급: 이 조각이 관여하는 이음매 타이밍")
+        adv.pack(fill="x", padx=8, pady=(8, 4))
+
+        self.crossfade_enabled = tk.BooleanVar(value=False)
+        self.crossfade_var = tk.DoubleVar(value=60)
+        self._add_optional_slider(adv, "교차 길이(ms) - 다음/이전 조각과의 겹침",
+                                   self.crossfade_enabled, self.crossfade_var, 0, 150, self._commit)
+
+        self.coda_enabled = tk.BooleanVar(value=False)
+        self.coda_var = tk.DoubleVar(value=ktts.CODA_MAX_MS)
+        self._add_optional_slider(adv, "받침 길이(ms) - ㄴㄹㅁㅇ 전용",
+                                   self.coda_enabled, self.coda_var, 0, 300, self._commit)
+
+        self.stopgap_enabled = tk.BooleanVar(value=False)
+        self.stopgap_var = tk.DoubleVar(value=ktts.DEFAULT_STOP_GAP_MS)
+        self._add_optional_slider(adv, "받침 뒤 간격(ms) - 이 조각이 ㄱㄷㅂ받침으로 끝날 때",
+                                   self.stopgap_enabled, self.stopgap_var, 0, 300, self._commit)
+
+        btns = ttk.Frame(detail)
+        btns.pack(fill="x", padx=8, pady=8)
+        ttk.Button(btns, text="▶ 조정본 미리듣기", command=self._preview).pack(side="left")
+        ttk.Button(btns, text="▶ 원본 미리듣기", command=self._preview_original).pack(side="left", padx=8)
+        ttk.Button(btns, text="초기화", command=self._reset).pack(side="left", padx=8)
+
+        ttk.Button(detail, text="모든 변경사항 저장", command=self._save_all).pack(anchor="w", padx=8, pady=(16, 8))
+        self.status_label = ttk.Label(detail, text="", foreground="#888")
+        self.status_label.pack(anchor="w", padx=8)
+
+        self.all_names = self._list_sound_files()
+        self._refresh_list()
+
+    def _add_optional_slider(self, parent, label, enabled_var, value_var, lo, hi, on_change):
+        row = ttk.Frame(parent)
+        row.pack(fill="x", padx=4, pady=2)
+        text_var = tk.StringVar(value=f"{label}: {int(value_var.get())}ms")
+
+        def sync(_evt=None):
+            text_var.set(f"{label}: {int(value_var.get())}ms")
+            on_change()
+
+        ttk.Checkbutton(row, variable=enabled_var, command=sync).pack(side="left")
+        ttk.Label(row, textvariable=text_var, wraplength=260).pack(side="left", padx=4)
+        scale = ttk.Scale(row, from_=lo, to=hi, orient="horizontal", variable=value_var, command=sync, length=300)
+        scale.pack(fill="x", padx=4, pady=(2, 4))
+        return text_var
+
+    @staticmethod
+    def _list_sound_files() -> list:
+        if not os.path.isdir(SOUND_DIR):
+            return []
+        return sorted(f[:-4] for f in os.listdir(SOUND_DIR) if f.lower().endswith(".wav"))
+
+    def _refresh_list(self):
+        query = self.search_var.get().strip().lower()
+        self.listbox.delete(0, "end")
+        self.filtered = [n for n in self.all_names if query in n.lower()] if query else self.all_names
+        for name in self.filtered:
+            marker = " *" if name in self.app.overrides else ""
+            self.listbox.insert("end", name + marker)
+
+    def _load_raw(self, name):
+        if name not in self._raw_cache:
+            path = os.path.join(SOUND_DIR, name + ".wav")
+            self._raw_cache[name] = ktts.read_sample(path) if os.path.exists(path) else None
+        return self._raw_cache[name]
+
+    def _on_select(self, _evt=None):
+        selection = self.listbox.curselection()
+        if not selection:
+            return
+        name = self.filtered[selection[0]]
+        self.current_name = name
+        override = self.app.overrides.get(name, {})
+        self.name_label.config(text=name)
+        self.gain_var.set(override.get("gain_db", 0.0))
+        self.trim_start_var.set(override.get("trim_start_ms", 0.0))
+        self.trim_end_var.set(override.get("trim_end_ms", 0.0))
+
+        self.crossfade_enabled.set("crossfade_ms" in override)
+        self.crossfade_var.set(override.get("crossfade_ms", 60))
+        self.coda_enabled.set("coda_max_ms" in override)
+        self.coda_var.set(override.get("coda_max_ms", ktts.CODA_MAX_MS))
+        self.stopgap_enabled.set("stop_gap_ms" in override)
+        self.stopgap_var.set(override.get("stop_gap_ms", ktts.DEFAULT_STOP_GAP_MS))
+
+        self._sync_labels()
+
+        raw = self._load_raw(name)
+        if raw is not None:
+            self.waveform.load(raw)
+            self.waveform.set_trim(self.trim_start_var.get(), self.trim_end_var.get())
+        else:
+            self.waveform.peaks = []
+            self.waveform.redraw()
+
+    def _on_waveform_drag(self, start_ms, end_ms):
+        self.trim_start_var.set(round(start_ms))
+        self.trim_end_var.set(round(end_ms))
+        self._sync_labels()
+        self._commit()
+
+    def _sync_labels(self):
+        self.gain_text.set(f"음량 보정: {self.gain_var.get():+.1f}dB")
+        self.trim_start_text.set(f"시작 자르기: {int(self.trim_start_var.get())}ms")
+        self.trim_end_text.set(f"끝 자르기: {int(self.trim_end_var.get())}ms")
+
+    def _current_override(self) -> dict:
+        override = {}
+        gain = round(self.gain_var.get(), 1)
+        if gain:
+            override["gain_db"] = gain
+        start_ms = int(self.trim_start_var.get())
+        if start_ms:
+            override["trim_start_ms"] = start_ms
+        end_ms = int(self.trim_end_var.get())
+        if end_ms:
+            override["trim_end_ms"] = end_ms
+        if self.crossfade_enabled.get():
+            override["crossfade_ms"] = int(self.crossfade_var.get())
+        if self.coda_enabled.get():
+            override["coda_max_ms"] = int(self.coda_var.get())
+        if self.stopgap_enabled.get():
+            override["stop_gap_ms"] = int(self.stopgap_var.get())
+        return override
+
+    def _commit(self):
+        if not self.current_name:
+            return
+        override = self._current_override()
+        if override:
+            self.app.overrides[self.current_name] = override
+        else:
+            self.app.overrides.pop(self.current_name, None)
+
+    def _on_gain_change(self, _v):
+        self._sync_labels()
+        self._commit()
+
+    def _on_trim_start_change(self, _v):
+        self._sync_labels()
+        self._commit()
+        self.waveform.set_trim(self.trim_start_var.get(), self.trim_end_var.get())
+
+    def _on_trim_end_change(self, _v):
+        self._sync_labels()
+        self._commit()
+        self.waveform.set_trim(self.trim_start_var.get(), self.trim_end_var.get())
+
+    def _reset(self):
+        if not self.current_name:
+            return
+        self.gain_var.set(0.0)
+        self.trim_start_var.set(0.0)
+        self.trim_end_var.set(0.0)
+        self.crossfade_enabled.set(False)
+        self.coda_enabled.set(False)
+        self.stopgap_enabled.set(False)
+        self._sync_labels()
+        self.waveform.set_trim(0.0, 0.0)
+        self.app.overrides.pop(self.current_name, None)
+        self._refresh_list()
+
+    def _preview(self):
+        if not self.current_name:
+            return
+        name = self.current_name
+        override = self._current_override()
+
+        def work():
+            path = os.path.join(SOUND_DIR, name + ".wav")
+            if not os.path.exists(path):
+                self.after(0, lambda: messagebox.showwarning("한국어 TTS", f"파일이 없습니다: {name}.wav"))
+                return
+            samples = ktts.read_sample(path, override=override)
+            wav_bytes = ktts.to_wav_bytes(samples)
+            self.app.player.play(wav_bytes)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _preview_original(self):
+        """A/B reference: plays the sample exactly as the automatic pipeline
+        produces it, with no fine-tuning override applied, for comparison."""
+        if not self.current_name:
+            return
+        name = self.current_name
+
+        def work():
+            raw = self._load_raw(name)
+            if raw is None:
+                self.after(0, lambda: messagebox.showwarning("한국어 TTS", f"파일이 없습니다: {name}.wav"))
+                return
+            wav_bytes = ktts.to_wav_bytes(raw)
+            self.app.player.play(wav_bytes)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _export(self):
+        self._commit()
+        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")],
+                                             initialfile="sound_overrides.json")
+        if not path:
+            return
+        try:
+            ktts.save_overrides(path, self.app.overrides)
+        except OSError as e:
+            messagebox.showerror("한국어 TTS", f"내보내기 실패: {e}")
+            return
+        messagebox.showinfo("한국어 TTS", f"내보냄: {path}")
+
+    def _import(self):
+        path = filedialog.askopenfilename(filetypes=[("JSON", "*.json"), ("모든 파일", "*.*")])
+        if not path:
+            return
+        imported = ktts.load_overrides(path)
+        if not imported:
+            messagebox.showwarning("한국어 TTS", "불러올 내용이 없습니다 (빈 파일이거나 형식이 올바르지 않습니다).")
+            return
+        merge = messagebox.askyesno(
+            "한국어 TTS",
+            f"{len(imported)}개 조각의 설정을 불러왔습니다.\n"
+            "예: 기존 설정에 병합 (같은 이름은 덮어씀)\n"
+            "아니오: 기존 설정을 전부 대체",
+        )
+        if merge:
+            self.app.overrides.update(imported)
+        else:
+            self.app.overrides = imported
+        self._refresh_list()
+        if self.current_name:
+            self._on_select_by_name(self.current_name)
+        self.status_label.config(text="불러옴 (저장하려면 '모든 변경사항 저장'을 누르세요)")
+
+    def _on_select_by_name(self, name):
+        if name in self.filtered:
+            idx = self.filtered.index(name)
+            self.listbox.selection_clear(0, "end")
+            self.listbox.selection_set(idx)
+            self._on_select()
+
+    def _save_all(self):
+        self._commit()
+        try:
+            ktts.save_overrides(OVERRIDES_PATH, self.app.overrides)
+        except OSError as e:
+            messagebox.showerror("한국어 TTS", f"저장 실패: {e}")
+            return
+        self._refresh_list()
+        self.status_label.config(text=f"저장됨: {OVERRIDES_PATH}")
+
+
+class BatchTab(ttk.Frame):
+    """Turns a list of lines (typed in, or loaded from a .txt file) into one
+    WAV file per line in a chosen output folder - a script/subtitle file in,
+    a folder of numbered clips out. Uses the exact same settings/overrides
+    as the 재생 tab (MainTab._build), so output matches what Play would
+    produce for each line."""
+
+    def __init__(self, parent, app: App):
+        super().__init__(parent)
+        self.app = app
+        self.output_dir = None
+
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=8, pady=8)
+        ttk.Label(top, text="한 줄에 한 문장씩 입력하거나 텍스트 파일을 불러오세요:").pack(anchor="w")
+        ttk.Button(top, text="텍스트 파일 불러오기...", command=self._load_file).pack(anchor="w", pady=4)
+
+        self.text_box = tk.Text(self, height=14, wrap="word")
+        self.text_box.pack(fill="both", expand=True, padx=8, pady=4)
+
+        out_row = ttk.Frame(self)
+        out_row.pack(fill="x", padx=8, pady=4)
+        ttk.Button(out_row, text="출력 폴더 선택...", command=self._choose_output_dir).pack(side="left")
+        self.output_label = ttk.Label(out_row, text="(출력 폴더를 선택하세요)", foreground="#888")
+        self.output_label.pack(side="left", padx=8)
+
+        run_row = ttk.Frame(self)
+        run_row.pack(fill="x", padx=8, pady=8)
+        self.run_button = ttk.Button(run_row, text="전체 변환", command=self._run)
+        self.run_button.pack(side="left")
+        self.progress_label = ttk.Label(run_row, text="", foreground="#888")
+        self.progress_label.pack(side="left", padx=8)
+
+        note = ("설정(속도/간격/볼륨/받침 뒤 간격)과 고급 설정 탭의 조각별 미세조정은 "
+                "재생 탭과 동일하게 적용됩니다. 파일명은 001_문장.wav 형식으로 저장됩니다.")
+        ttk.Label(self, text=note, wraplength=800, foreground="#888").pack(anchor="w", padx=8, pady=(0, 8))
+
+    def _load_file(self):
+        path = filedialog.askopenfilename(filetypes=[("텍스트 파일", "*.txt"), ("모든 파일", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except OSError as e:
+            messagebox.showerror("한국어 TTS", f"파일을 읽을 수 없습니다: {e}")
+            return
+        self.text_box.delete("1.0", "end")
+        self.text_box.insert("1.0", content)
+
+    def _choose_output_dir(self):
+        path = filedialog.askdirectory()
+        if not path:
+            return
+        self.output_dir = path
+        self.output_label.config(text=path)
+
+    def _lines(self):
+        raw = self.text_box.get("1.0", "end")
+        return [line.strip() for line in raw.splitlines() if line.strip()]
+
+    @staticmethod
+    def _sanitize_filename(text: str, max_len: int = 24) -> str:
+        cleaned = "".join(c for c in text if c not in '\\/:*?"<>|').strip()
+        cleaned = cleaned[:max_len] if cleaned else "untitled"
+        return cleaned
+
+    def _run(self):
+        lines = self._lines()
+        if not lines:
+            messagebox.showinfo("한국어 TTS", "변환할 문장이 없습니다.")
+            return
+        if not self.output_dir:
+            messagebox.showinfo("한국어 TTS", "먼저 출력 폴더를 선택하세요.")
+            return
+
+        self.run_button.config(state="disabled")
+
+        def work():
+            total = len(lines)
+            all_missing = set()
+            errors = []
+            digits = len(str(total))
+            for i, line in enumerate(lines, start=1):
+                self.after(0, lambda i=i, total=total: self.progress_label.config(text=f"{i}/{total} 처리 중..."))
+                try:
+                    track, missing = self.app.main_tab._build(line)
+                except ktts.AudioError as e:
+                    errors.append(f"{line}: {e}")
+                    continue
+                if missing:
+                    all_missing.update(missing)
+                if not len(track):
+                    errors.append(f"{line}: 읽을 수 있는 한글이 없습니다.")
+                    continue
+                wav_bytes = ktts.to_wav_bytes(track)
+                volume = self.app.settings["volume"]
+                if volume < 1.0:
+                    wav_bytes = _scale_wav_volume(wav_bytes, volume)
+                filename = f"{i:0{digits}d}_{self._sanitize_filename(line)}.wav"
+                out_path = os.path.join(self.output_dir, filename)
+                try:
+                    with open(out_path, "wb") as f:
+                        f.write(wav_bytes)
+                except OSError as e:
+                    errors.append(f"{line}: {e}")
+
+            def done():
+                self.run_button.config(state="normal")
+                self.progress_label.config(text=f"완료: {total - len(errors)}/{total}")
+                summary = [f"{total - len(errors)}개 중 {total}개 변환 완료.", f"저장 위치: {self.output_dir}"]
+                if all_missing:
+                    summary.append("음성 조각을 찾지 못해 건너뜀: " + ", ".join(sorted(all_missing)))
+                if errors:
+                    summary.append("오류:\n" + "\n".join(errors[:10]))
+                messagebox.showinfo("한국어 TTS", "\n\n".join(summary))
+
+            self.after(0, done)
+
+        threading.Thread(target=work, daemon=True).start()
+
+
+if __name__ == "__main__":
+    if not os.path.isdir(SOUND_DIR):
+        print(f"음성 폴더가 없습니다: {SOUND_DIR}")
+        sys.exit(1)
+    App().mainloop()

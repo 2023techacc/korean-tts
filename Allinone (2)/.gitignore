@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.pyc
+data/players.json
+_backup/
+*.zip
+
+# Built by PyInstaller (see BUILD_EXE.txt) - distributed via GitHub Releases,
+# not committed; rebuild locally with the command in BUILD_EXE.txt.
+KoreanTTS.exe
+build_temp/
+*.spec
+
+# Per-machine GUI window state (last-used sliders etc.), not shared config -
+# sound_overrides.json (the actual fine-tuning data) IS tracked on purpose.
+gui_settings.json

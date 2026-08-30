@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.KoreanTts">
+
+        <!-- Standalone app: type text, play/save it, same feature set as tts.py. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.KoreanTts">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          This is the actual "read selected text without leaving the app"
+          feature. Any app that uses Android's standard text selection
+          (browsers, notes apps, messaging apps, etc.) will show "한국어로
+          읽기" in the popup menu that already appears next to selected text,
+          right alongside "Copy" / "Web search" / "Translate". Tapping it
+          launches this activity, which is fully transparent and finishes
+          itself right after speaking, so the app you were in is never
+          covered or backgrounded.
+        -->
+        <activity
+            android:name=".ProcessTextActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:label="@string/process_text_label"
+            android:theme="@style/Theme.KoreanTts.Transparent">
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
+        <!-- Lets "WAV로 저장" hand the rendered clip to the share sheet
+             (Files, Drive, Bluetooth, etc.) without needing any storage
+             permission. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+    </application>
+
+</manifest>

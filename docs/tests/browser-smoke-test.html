@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>smoke test</title></head>
+<body>
+<div id="result">RUNNING</div>
+<script type="module">
+  import { textToGroups, textToPronunciation } from "../korean-phonology.js";
+  import { buildAudio, toWavBytes } from "../korean-audio.js";
+
+  const result = document.getElementById("result");
+  try {
+    const text = "안녕하세요 학교에 갔다";
+    const pron = textToPronunciation(text);
+    const groups = textToGroups(text);
+
+    async function loadSampleBuffer(name) {
+      const res = await fetch(`../sound/${name}.wav`);
+      if (!res.ok) return null;
+      return await res.arrayBuffer();
+    }
+
+    const { samples, missing } = await buildAudio(groups, loadSampleBuffer, {});
+
+    // exercise the same AudioBuffer construction app.js uses
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const buffer = ctx.createBuffer(1, samples.length, 44100);
+    const channel = buffer.getChannelData(0);
+    for (let i = 0; i < samples.length; i++) channel[i] = samples[i] / 32768;
+
+    const wavBytes = toWavBytes(samples);
+
+    result.textContent = JSON.stringify({
+      pron,
+      sampleCount: samples.length,
+      missing,
+      audioBufferLength: buffer.length,
+      audioBufferChannels: buffer.numberOfChannels,
+      wavByteLength: wavBytes.byteLength,
+      status: "OK",
+    });
+  } catch (e) {
+    result.textContent = "ERROR: " + e.message + "\n" + e.stack;
+  }
+</script>
+</body>
+</html>

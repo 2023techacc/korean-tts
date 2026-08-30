@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>한국어 TTS</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main>
+    <h1>한국어 TTS</h1>
+    <p class="subtitle">브라우저에서 바로 재생됩니다 - 서버로 아무것도 전송되지 않습니다.</p>
+
+    <textarea id="text" rows="4" placeholder="읽을 한국어를 입력하세요"></textarea>
+
+    <div class="buttons">
+      <button id="btnPlay">재생</button>
+      <button id="btnStop" class="secondary">정지</button>
+      <button id="btnPron" class="secondary">발음 보기</button>
+      <button id="btnSave" class="secondary">WAV로 저장</button>
+    </div>
+
+    <p id="pronOutput" class="pron" hidden></p>
+    <p id="status" class="status" hidden></p>
+
+    <fieldset class="settings">
+      <legend>설정</legend>
+
+      <label class="slider-row">
+        <span class="slider-label">재생 속도<span id="speedValue">1.00x</span></span>
+        <input id="speed" type="range" min="0.5" max="2.0" step="0.05" value="1.0" />
+      </label>
+
+      <label class="slider-row">
+        <span class="slider-label">띄어쓰기 간격<span id="gapValue">300ms</span></span>
+        <input id="gap" type="range" min="0" max="800" step="25" value="300" />
+      </label>
+
+      <label class="slider-row">
+        <span class="slider-label">볼륨<span id="volumeValue">100%</span></span>
+        <input id="volume" type="range" min="0" max="100" step="5" value="100" />
+      </label>
+
+      <label class="slider-row">
+        <span class="slider-label">받침 ㄱㄷㅂ 뒤 간격<span id="stopGapValue">40ms</span></span>
+        <input id="stopGap" type="range" min="0" max="200" step="10" value="40" />
+      </label>
+    </fieldset>
+
+    <p class="footnote">
+      속도를 바꾸면 음높이도 함께 바뀝니다 (리샘플링 방식) - 데스크톱 tts.py 와 같은 동작입니다.
+      설정은 이 브라우저에 저장되어 다음에 열 때도 유지됩니다.
+    </p>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

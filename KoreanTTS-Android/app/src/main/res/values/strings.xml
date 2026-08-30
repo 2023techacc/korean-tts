@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">한국어 TTS</string>
+    <!-- This is what shows up in the text-selection popup menu in other apps. -->
+    <string name="process_text_label">한국어로 읽기</string>
+
+    <string name="hint_text">읽을 한국어를 입력하세요</string>
+    <string name="btn_play">재생</string>
+    <string name="btn_stop">정지</string>
+    <string name="btn_pronunciation">발음 보기</string>
+    <string name="btn_save">WAV로 저장</string>
+    <string name="label_pronunciation">발음: %1$s</string>
+    <string name="error_empty">읽을 수 있는 한글이 없습니다.</string>
+    <string name="error_missing_samples">음성 조각 %1$d개를 찾지 못해 건너뛰었습니다.</string>
+    <string name="label_speed">재생 속도: %1$.2fx</string>
+    <string name="label_speed_default">재생 속도: 1.00x</string>
+    <string name="speed_slider_description">재생 속도 조절</string>
+    <string name="label_gap">띄어쓰기 간격: %1$dms</string>
+    <string name="label_gap_default">띄어쓰기 간격: 300ms</string>
+    <string name="gap_slider_description">띄어쓰기/문장부호 간격 조절</string>
+    <string name="label_volume">볼륨: %1$d%%</string>
+    <string name="label_volume_default">볼륨: 100%</string>
+    <string name="volume_slider_description">볼륨 조절</string>
+    <string name="label_stop_gap">받침 ㄱㄷㅂ 뒤 간격: %1$dms</string>
+    <string name="label_stop_gap_default">받침 ㄱㄷㅂ 뒤 간격: 40ms</string>
+    <string name="stop_gap_slider_description">받침 ㄱㄷㅂ 뒤 간격 조절</string>
+</resources>

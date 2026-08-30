@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A simple speaker + sound-wave glyph, centered in the adaptive icon's
+     66x66dp safe zone (the full canvas is 108x108dp). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,40 L38,68 L52,68 L70,84 L70,24 L52,40 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M78,44 C83,49 83,59 78,64"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M86,36 C95,45 95,63 86,72"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+</vector>
