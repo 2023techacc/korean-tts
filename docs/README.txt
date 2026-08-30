@@ -1,4 +1,4 @@
-![GitHub All Releases](https://shields.io)
+[![Download](https://img.shields.io/github/v/release/2023techacc/korean-tts?include_prereleases&label=Download&color=blue)](https://github.com/2023techacc/korean-tts/releases/latest)
 
 한국어 TTS - 웹 버전 (GitHub Pages)
 ====================================
