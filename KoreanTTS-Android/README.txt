@@ -30,16 +30,22 @@
 2) 열기
 ====================================================
     1. Android Studio 실행 -> "Open" -> 이 폴더(KoreanTTS-Android) 선택.
-    2. 처음 열면 "Gradle wrapper가 없습니다" 같은 안내 배너가 뜰 수
-       있습니다 -> 안내에 따라 자동 생성/동기화를 눌러주세요.
-       (이 프로젝트에는 gradlew/gradlew.bat 실행에 필요한 바이너리
-       gradle-wrapper.jar 를 포함하지 않았습니다 - Android Studio가
-       열 때 자동으로 만들어줍니다.)
-    3. Gradle 동기화가 끝날 때까지 기다립니다 (처음엔 각종 라이브러리를
+    2. Gradle 동기화가 끝날 때까지 기다립니다 (처음엔 각종 라이브러리를
        받느라 몇 분 걸릴 수 있습니다. 인터넷 연결 필요).
-    4. AGP(Android Gradle Plugin)나 Kotlin 버전을 올리라는 안내가 뜨면
+    3. AGP(Android Gradle Plugin)나 Kotlin 버전을 올리라는 안내가 뜨면
        "Upgrade" 를 눌러도 안전합니다 (이 프로젝트는 최신 버전 기준으로
        작성했지만, Android Studio 버전에 따라 약간 다를 수 있습니다).
+
+Android Studio 없이 터미널/CI에서 빌드하기
+    gradlew/gradlew.bat (Gradle wrapper)가 포함되어 있으므로 아래처럼
+    직접 빌드할 수도 있습니다 (JDK 17 필요):
+
+        cd KoreanTTS-Android
+        ./gradlew assembleDebug          (Windows: gradlew.bat assembleDebug)
+
+    .github/workflows/release.yml 이 바로 이 명령으로 GitHub Actions에서
+    자동으로 APK를 빌드합니다 - 자세한 내용은 저장소 루트의
+    BUILD_EXE.txt의 "자동 빌드 (GitHub Releases)" 항목 참고.
 
 
 ====================================================

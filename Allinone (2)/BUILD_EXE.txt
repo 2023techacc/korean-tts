@@ -82,3 +82,17 @@ gui.py 의 "고급 설정" 탭에서 저장하는 sound_overrides.json 은 exe �
   는 이 환경에서 GUI 이벤트 루프를 오래 띄워두기 어려워 하지 못했습니다 -
   처음 실행할 때 버튼/슬라이더/드래그가 실제로 기대대로 동작하는지 한 번
   확인해보세요.
+
+자동 빌드 (GitHub Releases)
+----------------------------
+이 저장소를 GitHub에 올려두면, 위 명령을 손으로 칠 필요 없이
+.github/workflows/release.yml 이 자동으로 KoreanTTS.exe 와 Android APK를
+빌드해서 GitHub Release 초안(draft)으로 올려줍니다.
+
+    git tag v1.0.0
+    git push origin v1.0.0
+
+또는 GitHub 저장소 페이지 -> Actions -> Release -> Run workflow 에서
+태그 이름을 직접 입력해도 됩니다 (그 태그가 없으면 새로 만들어줍니다).
+초안(draft) 상태로 생성되니, Releases 페이지에서 첨부 파일과 설명을
+확인한 뒤 직접 "Publish release"를 눌러야 실제로 공개됩니다.
