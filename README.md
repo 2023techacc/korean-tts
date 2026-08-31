@@ -29,15 +29,17 @@ sync-sound-assets.bat  Copies Allinone (2)/sound/ into the Android and web copie
 
 This repo tracks the TTS work only — a combined Discord bot (Pokémon RPG / music / school info) shares this folder locally but is intentionally gitignored, not part of this project's history.
 
-## Keeping the voice samples in sync
+## Voices
 
-`sound/` is duplicated three times (CLI, Android assets, web) because each platform needs its own bundled copy. After changing or re-recording a sample in `Allinone (2)/sound/`, run:
+`sound/` itself is always the "default" voice. A subfolder with the same 268 file names (`sound/narrator2/ga.wav`, etc.) is an additional voice, selectable in every interface (`--voice`/`--list-voices` on the CLI, a dropdown in the desktop app/Android/web) — see [`Allinone (2)/TTS_README.txt`](Allinone%20%282%29/TTS_README.txt)'s "여러 목소리" section for the full picture, including per-voice fine-tuning files and an Android-specific naming gotcha (folder names can't start with `_` or `.`).
+
+`sound/` is duplicated three times (CLI, Android assets, web) because each platform needs its own bundled copy. After changing/re-recording a sample, or adding a voice folder, run:
 
 ```
 sync-sound-assets.bat
 ```
 
-from the repo root. It checks the CLI copy for missing/renamed files, then mirrors it into the Android and web copies. Android additionally needs a rebuild to pick the change up; the web version picks it up on the next page load; the `.exe` needs a rebuild (see below).
+from the repo root. It checks the CLI copy for missing/renamed files, mirrors it into the Android and web copies, and (re)writes `docs/sound/voices.json` — the manifest the web version's voice dropdown reads, since a static site can't list its own directories. Android additionally needs a rebuild to pick the change up; the web version picks it up on the next page load; the `.exe` needs a rebuild (see below).
 
 ## Building
 
