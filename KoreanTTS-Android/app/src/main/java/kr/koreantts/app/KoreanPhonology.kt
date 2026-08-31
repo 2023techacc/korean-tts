@@ -63,6 +63,13 @@ object KoreanPhonology {
     private val H_CLUSTER_LEFTOVER = mapOf("ㄶ" to "ㄴ", "ㅀ" to "ㄹ")
     private val TENSIFY = mapOf("ㄱ" to "ㄲ", "ㄷ" to "ㄸ", "ㅂ" to "ㅃ", "ㅅ" to "ㅆ", "ㅈ" to "ㅉ")
 
+    // Local (single-syllable) vowel rules - depend only on a syllable's own
+    // (cho, jung), so applied once up front rather than as part of the
+    // pairwise pass. See korean_tts.py's J_GLIDE_TO_PLAIN/PALATAL_ONSETS
+    // comment for the full rationale (표준발음법 제5항 다만 1, 다만 3).
+    private val J_GLIDE_TO_PLAIN = mapOf("ㅑ" to "ㅏ", "ㅒ" to "ㅐ", "ㅕ" to "ㅓ", "ㅖ" to "ㅔ", "ㅛ" to "ㅗ", "ㅠ" to "ㅜ")
+    private val PALATAL_ONSETS = setOf("ㅈ", "ㅉ", "ㅊ")
+
     private fun isSyllable(ch: Char): Boolean = ch.code in HANGUL_START..HANGUL_END
 
     /** A decomposed Hangul syllable; mutated in place by [applyContextRules]. */
@@ -80,6 +87,19 @@ object KoreanPhonology {
             Slot.Hangul(Syl(CHOSEONG[offset / 588].toString(), JUNGSEONG[(offset % 588) / 28].toString(), JONGSEONG[offset % 28]))
         } else {
             Slot.Other(ch)
+        }
+    }
+
+    /** Palatal-glide deletion after ㅈ/ㅉ/ㅊ, and ㅢ -> ㅣ after a real consonant onset. */
+    private fun applyLocalVowelRules(slots: List<Slot>) {
+        for (slot in slots) {
+            val syl = (slot as? Slot.Hangul)?.syl ?: continue
+            val glide = J_GLIDE_TO_PLAIN[syl.jung]
+            if (syl.cho in PALATAL_ONSETS && glide != null) {
+                syl.jung = glide
+            } else if (syl.jung == "ㅢ" && syl.cho != "ㅇ") {
+                syl.jung = "ㅣ"
+            }
         }
     }
 
@@ -186,6 +206,7 @@ object KoreanPhonology {
      */
     fun textToPronunciation(text: String): String {
         val slots = parse(text)
+        applyLocalVowelRules(slots)
         applyContextRules(slots)
         val out = StringBuilder()
         for (slot in slots) {
@@ -236,6 +257,7 @@ object KoreanPhonology {
         }
 
         val slots = parse(text)
+        applyLocalVowelRules(slots)
         applyContextRules(slots)
 
         for (slot in slots) {

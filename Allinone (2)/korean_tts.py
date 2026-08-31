@@ -125,6 +125,37 @@ ASPIRATE = {"ㄱ": "ㅋ", "ㄷ": "ㅌ", "ㅂ": "ㅍ", "ㅈ": "ㅊ"}  # + ㅎ -> 
 H_CLUSTER_LEFTOVER = {"ㄶ": "ㄴ", "ㅀ": "ㄹ"}  # coda clusters ending in ㅎ
 TENSIFY = {"ㄱ": "ㄲ", "ㄷ": "ㄸ", "ㅂ": "ㅃ", "ㅅ": "ㅆ", "ㅈ": "ㅉ"}  # 경음화
 
+# ------------------------------------------------------
+# Local (single-syllable) vowel rules
+# ------------------------------------------------------
+#
+# Unlike the cross-syllable rules below, these depend only on a syllable's
+# own (cho, jung) — no neighbour involved — so they're applied once, up
+# front, rather than as part of the pairwise pass:
+#
+#   - 구개음화된 자음(ㅈ,ㅉ,ㅊ) 뒤 반모음 탈락 (표준발음법 제5항 다만 1):
+#     these three are already palatal, so a following /j/ glide is
+#     phonetically inert - 져/쪄/쳐/쟤 etc. are pronounced exactly like
+#     저/쩌/처/재. Applies to all six yotized vowels ㅑㅒㅕㅖㅛㅠ.
+#   - ㅢ의 단모음화 (표준발음법 제5항 다만 3): ㅢ is pronounced [ㅣ] whenever
+#     the syllable has a real consonant onset (희망 -> 히망, 무늬 -> 무니).
+#     With onset ㅇ (or no onset) it keeps the ㅡ+ㅣ glide (의사 stays 의사),
+#     which COMPOUND_VOWELS below still handles.
+J_GLIDE_TO_PLAIN = {"ㅑ": "ㅏ", "ㅒ": "ㅐ", "ㅕ": "ㅓ", "ㅖ": "ㅔ", "ㅛ": "ㅗ", "ㅠ": "ㅜ"}
+PALATAL_ONSETS = {"ㅈ", "ㅉ", "ㅊ"}
+
+
+def _apply_local_vowel_rules(slots):
+    for s in slots:
+        if not isinstance(s, list):
+            continue
+        cho, jung = s[0], s[1]
+        if cho in PALATAL_ONSETS and jung in J_GLIDE_TO_PLAIN:
+            s[1] = J_GLIDE_TO_PLAIN[jung]
+        elif jung == "ㅢ" and cho != "ㅇ":
+            s[1] = "ㅣ"
+    return slots
+
 
 def _parse(text: str):
     """Hangul syllables become mutable [cho, jung, jong] triples; everything
@@ -225,6 +256,13 @@ def _compose(cho, jung, jong):
     return chr(HANGUL_START + (CHO_INDEX[cho] * 21 + JUNG_INDEX[jung]) * 28 + JONG_INDEX[jong])
 
 
+def _parse_and_apply_rules(text: str):
+    """Decompose `text` into (cho, jung, jong) slots and apply every
+    pronunciation rule (local vowel rules, then cross-syllable ones) -
+    the shared first step behind text_to_pronunciation and text_to_groups."""
+    return _apply_context_rules(_apply_local_vowel_rules(_parse(text)))
+
+
 def text_to_pronunciation(text: str) -> str:
     """Rewrite `text` into its standard spoken form (all rules above applied).
 
@@ -232,7 +270,7 @@ def text_to_pronunciation(text: str) -> str:
     actually gets voiced; tts.py's -p flag exists so you can see it before
     committing to audio.
     """
-    slots = _apply_context_rules(_parse(text))
+    slots = _parse_and_apply_rules(text)
     out = []
     for s in slots:
         if not isinstance(s, list):
@@ -300,7 +338,7 @@ def text_to_groups(text: str):
         if not groups or groups[-1][1] != [PAUSE]:
             groups.append(("single", [PAUSE]))
 
-    for slot in _apply_context_rules(_parse(text)):
+    for slot in _parse_and_apply_rules(text):
         if not isinstance(slot, list):
             pause()
             continue

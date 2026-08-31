@@ -57,6 +57,13 @@ const ASPIRATE = { ㄱ: "ㅋ", ㄷ: "ㅌ", ㅂ: "ㅍ", ㅈ: "ㅊ" };
 const H_CLUSTER_LEFTOVER = { ㄶ: "ㄴ", ㅀ: "ㄹ" };
 const TENSIFY = { ㄱ: "ㄲ", ㄷ: "ㄸ", ㅂ: "ㅃ", ㅅ: "ㅆ", ㅈ: "ㅉ" };
 
+// Local (single-syllable) vowel rules - depend only on a syllable's own
+// (cho, jung), so applied once up front rather than as part of the pairwise
+// pass below. See korean_tts.py's J_GLIDE_TO_PLAIN/PALATAL_ONSETS comment
+// for the full rationale (표준발음법 제5항 다만 1, 다만 3).
+const J_GLIDE_TO_PLAIN = { ㅑ: "ㅏ", ㅒ: "ㅐ", ㅕ: "ㅓ", ㅖ: "ㅔ", ㅛ: "ㅗ", ㅠ: "ㅜ" };
+const PALATAL_ONSETS = new Set(["ㅈ", "ㅉ", "ㅊ"]);
+
 function isSyllable(ch) {
   const code = ch.codePointAt(0);
   return code >= HANGUL_START && code <= HANGUL_END;
@@ -76,6 +83,21 @@ function parse(text) {
       });
     } else {
       slots.push(ch);
+    }
+  }
+  return slots;
+}
+
+// Palatal-glide deletion after ㅈ/ㅉ/ㅊ, and ㅢ -> ㅣ after a real consonant
+// onset. Mutates the slot objects in place.
+function applyLocalVowelRules(slots) {
+  for (const s of slots) {
+    if (typeof s === "string") continue;
+    const glide = J_GLIDE_TO_PLAIN[s.jung];
+    if (PALATAL_ONSETS.has(s.cho) && glide !== undefined) {
+      s.jung = glide;
+    } else if (s.jung === "ㅢ" && s.cho !== "ㅇ") {
+      s.jung = "ㅣ";
     }
   }
   return slots;
@@ -175,7 +197,7 @@ function compose(cho, jung, jong) {
 // e.g. "옷이 좋아요" -> "오시 조아요", "읽었다" -> "일걷따". This is what
 // actually gets voiced.
 export function textToPronunciation(text) {
-  const slots = applyContextRules(parse(text));
+  const slots = applyContextRules(applyLocalVowelRules(parse(text)));
   let out = "";
   for (const s of slots) {
     if (typeof s === "string") {
@@ -222,7 +244,7 @@ export function textToGroups(text) {
     }
   }
 
-  for (const slot of applyContextRules(parse(text))) {
+  for (const slot of applyContextRules(applyLocalVowelRules(parse(text)))) {
     if (typeof slot === "string") {
       pause();
       continue;
