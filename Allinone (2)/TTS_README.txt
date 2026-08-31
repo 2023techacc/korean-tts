@@ -49,6 +49,8 @@
                         "Per-sample fine-tuning overrides" 주석 참고)
     --no-overrides      음성 조각별 미세조정 파일을 무시하고 자동 처리 결과만 사용
     --sound-dir DIR     음성 파일 폴더 위치 지정 (기본 ./sound)
+    --voice NAME        사용할 목소리, 기본 'default' (아래 "여러 목소리" 참고)
+    --list-voices       사용 가능한 목소리 목록을 출력하고 종료
     --check             빠진 음성 파일을 점검하고 종료
 
 
@@ -64,7 +66,35 @@
     :speed 1.5    재생 속도를 1.5배로 바꾸기 (0.5~2.0)
     :stopgap 80   받침 ㄱㄷㅂ 뒤 간격을 80ms로 바꾸기 (기본 40, 0이면 끔)
     :gap 200      쉼 길이를 200ms로 바꾸기
+    :voice NAME   목소리 바꾸기
+    :voices       사용 가능한 목소리 목록 보기
     :save out.wav 방금 입력한 문장을 파일로 저장
+
+
+4-1) 여러 목소리 (multi-voice)
+-------------------------------
+sound/ 바로 아래 있는 파일들이 항상 'default' 목소리입니다 - 지금까지
+쓰던 대로 그냥 두면 됩니다. 다른 목소리를 추가하려면 sound/ 안에 새
+폴더를 만들고 (예: sound/narrator2/) 같은 파일 이름(ga.wav, ab.wav, ...)
+으로 녹음을 채워 넣으면 됩니다. 일부만 채워도 되고, 없는 파일은 다른
+파일들과 마찬가지로 "없음"으로 보고되고 건너뜁니다.
+
+    py tts.py --list-voices                사용 가능한 목소리 목록
+    py tts.py --voice narrator2 안녕하세요   그 목소리로 재생
+    py tts.py --voice narrator2 --check     그 목소리에서 빠진 파일 점검
+
+음성 조각별 미세조정(--overrides, 고급 설정 GUI)도 목소리별로 따로
+저장됩니다: default는 지금처럼 sound_overrides.json, 다른 목소리는
+sound_overrides.<목소리이름>.json 파일을 씁니다. 자동으로 나뉘므로
+따로 신경 쓸 필요는 없습니다.
+
+새 목소리를 추가했다면 sync-sound-assets.bat 을 다시 실행해야
+Android 앱과 웹 버전에도 반영됩니다 (해당 스크립트 안내 참고).
+
+목소리 폴더 이름은 영문/숫자로 (예: narrator2) - 안드로이드는 밑줄(_)이나
+마침표(.)로 시작하는 assets 폴더를 빌드 시 자동으로 빼버리기 때문에,
+그런 이름을 쓰면 CLI/데스크톱에서는 보이는데 Android 앱에서만 안 보이는
+혼란스러운 상황이 생깁니다.
 
 
 ====================================================

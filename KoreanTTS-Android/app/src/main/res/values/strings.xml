@@ -24,4 +24,6 @@
     <string name="label_stop_gap">받침 ㄱㄷㅂ 뒤 간격: %1$dms</string>
     <string name="label_stop_gap_default">받침 ㄱㄷㅂ 뒤 간격: 40ms</string>
     <string name="stop_gap_slider_description">받침 ㄱㄷㅂ 뒤 간격 조절</string>
+    <string name="label_voice">목소리</string>
+    <string name="voice_spinner_description">목소리 선택</string>
 </resources>

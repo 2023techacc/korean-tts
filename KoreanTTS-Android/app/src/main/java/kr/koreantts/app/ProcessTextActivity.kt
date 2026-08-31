@@ -35,11 +35,14 @@ class ProcessTextActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val result = withContext(Dispatchers.Default) {
                 val groups = KoreanPhonology.textToGroups(text)
+                val voices = AudioEngine.listVoices(assets)
+                val voice = Prefs.getVoice(this@ProcessTextActivity).takeIf { it in voices } ?: AudioEngine.DEFAULT_VOICE
                 AudioEngine.buildAudio(
                     assets,
                     groups,
                     gapMs = Prefs.getGapMs(this@ProcessTextActivity),
                     stopGapMs = Prefs.getStopGapMs(this@ProcessTextActivity),
+                    voice = voice,
                 )
             }
 

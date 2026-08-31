@@ -2,6 +2,8 @@ package kr.koreantts.app
 
 import android.content.Intent
 import android.os.Bundle
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
@@ -26,11 +28,24 @@ class MainActivity : AppCompatActivity() {
     private var gapMs = Prefs.DEFAULT_GAP_MS
     private var volume = Prefs.DEFAULT_VOLUME
     private var stopGapMs = Prefs.DEFAULT_STOP_GAP_MS
+    private var voice = AudioEngine.DEFAULT_VOICE
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        val voices = AudioEngine.listVoices(assets)
+        voice = Prefs.getVoice(this).takeIf { it in voices } ?: AudioEngine.DEFAULT_VOICE
+        binding.voiceSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, voices)
+        binding.voiceSpinner.setSelection(voices.indexOf(voice))
+        binding.voiceSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                voice = voices[position]
+                Prefs.setVoice(this@MainActivity, voice)
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
 
         speed = Prefs.getSpeed(this)
         binding.speedSlider.value = speed
@@ -100,7 +115,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val result = withContext(Dispatchers.Default) {
                 val groups = KoreanPhonology.textToGroups(text)
-                AudioEngine.buildAudio(assets, groups, gapMs = gapMs, stopGapMs = stopGapMs)
+                AudioEngine.buildAudio(assets, groups, gapMs = gapMs, stopGapMs = stopGapMs, voice = voice)
             }
             if (result.samples.isEmpty()) {
                 Toast.makeText(this@MainActivity, R.string.error_empty, Toast.LENGTH_SHORT).show()
@@ -124,7 +139,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val (result, file) = withContext(Dispatchers.Default) {
                 val groups = KoreanPhonology.textToGroups(text)
-                val built = AudioEngine.buildAudio(assets, groups, gapMs = gapMs, stopGapMs = stopGapMs)
+                val built = AudioEngine.buildAudio(assets, groups, gapMs = gapMs, stopGapMs = stopGapMs, voice = voice)
                 val dir = File(cacheDir, "tts").apply { mkdirs() }
                 val outFile = File(dir, "tts_${System.currentTimeMillis()}.wav")
                 if (built.samples.isNotEmpty()) outFile.writeBytes(AudioEngine.toWavBytes(built.samples))

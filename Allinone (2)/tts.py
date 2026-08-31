@@ -5,6 +5,8 @@
     py tts.py -p 국물이 좋다          실제 발음(연음/비음화/격음화 등 적용)만 보기: '궁무리 조타'
     py tts.py -s 안녕하세요           재생 없이 샘플 순서만 보기
     py tts.py --speed 1.5 안녕하세요  1.5배 빠르게 재생 (0.5~2.0)
+    py tts.py --voice narrator2 안녕  다른 목소리로 재생 (sound/narrator2/ 필요)
+    py tts.py --list-voices           사용 가능한 목소리 목록
     py tts.py                         대화형 모드
     py tts.py --check                 빠진 음성 파일 점검
 """
@@ -50,9 +52,11 @@ def speak(text, args, allow_play=True):
 
     try:
         groups = ktts.text_to_groups(text)
-        overrides = {} if args.no_overrides else ktts.load_overrides(args.overrides)
+        sound_dir = ktts.voice_dir(args.sound_dir, args.voice)
+        overrides_path = ktts.overrides_path_for_voice(args.overrides, args.voice)
+        overrides = {} if args.no_overrides else ktts.load_overrides(overrides_path)
         track, missing = ktts.build_audio(
-            groups, args.sound_dir, gap_ms=args.gap, fade_ms=args.fade,
+            groups, sound_dir, gap_ms=args.gap, fade_ms=args.fade,
             normalize=not args.no_normalize, crossfade=not args.no_crossfade,
             speed=args.speed, stop_gap_ms=args.stop_gap, overrides=overrides,
         )
@@ -90,6 +94,7 @@ def interactive(args):
     info("  :save <파일> 마지막 문장 저장   :norm 음량 보정 토글   :cross 크로스페이드 토글")
     info(f"  :speed <배속> 재생 속도 ({ktts.MIN_SPEED}~{ktts.MAX_SPEED}, 기본 1.0)")
     info(f"  :stopgap <ms> 받침 ㄱㄷㅂ 뒤 간격 (기본 {ktts.DEFAULT_STOP_GAP_MS}ms, 0이면 끔)")
+    info(f"  :voice <이름> 목소리 바꾸기   :voices 사용 가능한 목소리 목록 (현재: {args.voice})")
     info()
 
     last = None
@@ -148,6 +153,24 @@ def interactive(args):
                 info(f"  사용법: :stopgap {ktts.DEFAULT_STOP_GAP_MS}")
             continue
 
+        if line == ":voices":
+            voices = ktts.list_voices(args.sound_dir)
+            info("  사용 가능한 목소리: " + ", ".join(voices) + f"  (현재: {args.voice})")
+            continue
+
+        if line.startswith(":voice"):
+            parts = line.split(maxsplit=1)
+            if len(parts) != 2:
+                info("  사용법: :voice narrator2   (:voices 로 목록 확인)")
+            else:
+                name = parts[1].strip()
+                if name not in ktts.list_voices(args.sound_dir):
+                    info(f"  그런 목소리가 없습니다: {name}  (:voices 로 목록 확인)")
+                else:
+                    args.voice = name
+                    info(f"  목소리: {args.voice}")
+            continue
+
         if line.startswith(":gap"):
             parts = line.split()
             if len(parts) == 2 and parts[1].isdigit():
@@ -179,14 +202,16 @@ def interactive(args):
 
 def check(args):
     """Report which samples the engine can ask for but sound/ doesn't have."""
-    if not os.path.isdir(args.sound_dir):
-        info(f"❌ 음성 폴더가 없습니다: {args.sound_dir}")
+    sound_dir = ktts.voice_dir(args.sound_dir, args.voice)
+    if not os.path.isdir(sound_dir):
+        info(f"❌ 음성 폴더가 없습니다: {sound_dir}")
         return 1
 
-    have = {f[:-4] for f in os.listdir(args.sound_dir) if f.lower().endswith(".wav")}
+    have = {f[:-4] for f in os.listdir(sound_dir) if f.lower().endswith(".wav")}
     needed = ktts.all_reachable_samples()
 
-    info(f"음성 폴더 : {args.sound_dir}")
+    info(f"목소리     : {args.voice}")
+    info(f"음성 폴더 : {sound_dir}")
     info(f"보유 파일 : {len(have)}개")
     info(f"필요 음절 : {len(needed)}개 (한글 11,172자를 모두 읽는 데 필요한 조각)")
 
@@ -239,8 +264,19 @@ def main(argv=None):
                         help="음성 조각별 미세조정을 끄고 자동 처리 결과만 사용")
     parser.add_argument("--sound-dir", default=DEFAULT_SOUND_DIR, metavar="DIR",
                         help="음성 파일 폴더, 기본 ./sound")
+    parser.add_argument("--voice", default=ktts.DEFAULT_VOICE, metavar="NAME",
+                        help="사용할 목소리, 기본 'default' (--sound-dir 바로 아래의 파일들). "
+                             "다른 목소리는 --sound-dir/<이름>/ 에 같은 파일들을 넣어두면 "
+                             "--voice <이름> 으로 선택할 수 있음 (--list-voices 로 확인)")
+    parser.add_argument("--list-voices", action="store_true",
+                        help="--sound-dir 아래에서 사용 가능한 목소리 목록을 출력하고 종료")
     parser.add_argument("--check", action="store_true", help="빠진 음성 파일을 점검하고 종료")
     args = parser.parse_args(argv)
+
+    if args.list_voices:
+        for name in ktts.list_voices(args.sound_dir):
+            info(name)
+        return 0
 
     clamped = max(ktts.MIN_SPEED, min(ktts.MAX_SPEED, args.speed))
     if clamped != args.speed:
@@ -250,9 +286,13 @@ def main(argv=None):
     if args.check:
         return check(args)
 
-    if not os.path.isdir(args.sound_dir):
-        info(f"❌ 음성 폴더가 없습니다: {args.sound_dir}")
-        info("   --sound-dir 로 경로를 지정하거나 sound.zip 을 풀어주세요.")
+    voice_sound_dir = ktts.voice_dir(args.sound_dir, args.voice)
+    if not os.path.isdir(voice_sound_dir):
+        info(f"❌ 음성 폴더가 없습니다: {voice_sound_dir}")
+        if args.voice != ktts.DEFAULT_VOICE:
+            info(f"   --list-voices 로 사용 가능한 목소리를 확인하세요.")
+        else:
+            info("   --sound-dir 로 경로를 지정하거나 sound.zip 을 풀어주세요.")
         return 1
 
     if not args.text:

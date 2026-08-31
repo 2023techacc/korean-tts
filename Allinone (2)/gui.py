@@ -35,7 +35,7 @@ else:
     RESOURCE_DIR = BASE_DIR
     WRITABLE_DIR = BASE_DIR
 
-SOUND_DIR = os.path.join(RESOURCE_DIR, "sound")
+SOUND_ROOT = os.path.join(RESOURCE_DIR, "sound")
 OVERRIDES_PATH = os.path.join(WRITABLE_DIR, ktts.DEFAULT_OVERRIDES_FILENAME)
 SETTINGS_PATH = os.path.join(WRITABLE_DIR, "gui_settings.json")
 
@@ -111,7 +111,10 @@ class Player:
 # Persisted GUI settings (speed/gap/volume/stop-gap sliders)
 # ------------------------------------------------------
 
-DEFAULT_SETTINGS = {"speed": 1.0, "gap_ms": 300, "volume": 1.0, "stop_gap_ms": ktts.DEFAULT_STOP_GAP_MS}
+DEFAULT_SETTINGS = {
+    "speed": 1.0, "gap_ms": 300, "volume": 1.0, "stop_gap_ms": ktts.DEFAULT_STOP_GAP_MS,
+    "voice": ktts.DEFAULT_VOICE,
+}
 
 
 def load_settings() -> dict:
@@ -145,7 +148,9 @@ class App(tk.Tk):
 
         self.player = Player()
         self.settings = load_settings()
-        self.overrides = ktts.load_overrides(OVERRIDES_PATH)
+        if self.settings["voice"] not in ktts.list_voices(SOUND_ROOT):
+            self.settings["voice"] = ktts.DEFAULT_VOICE  # a saved voice folder went missing
+        self.overrides = ktts.load_overrides(self.overrides_path())
 
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True, padx=8, pady=8)
@@ -158,6 +163,26 @@ class App(tk.Tk):
         notebook.add(self.batch_tab, text="일괄 변환")
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def current_sound_dir(self) -> str:
+        return ktts.voice_dir(SOUND_ROOT, self.settings["voice"])
+
+    def overrides_path(self) -> str:
+        return ktts.overrides_path_for_voice(OVERRIDES_PATH, self.settings["voice"])
+
+    def set_voice(self, voice: str) -> None:
+        """Switch the active voice: persist the outgoing voice's overrides
+        (so in-progress fine-tuning is never silently lost on switch), then
+        load the new voice's own overrides and refresh the tuning tab."""
+        if voice == self.settings["voice"]:
+            return
+        try:
+            ktts.save_overrides(self.overrides_path(), self.overrides)
+        except OSError:
+            pass
+        self.settings["voice"] = voice
+        self.overrides = ktts.load_overrides(self.overrides_path())
+        self.tuning_tab.on_voice_changed()
 
     def _on_close(self):
         self.player.stop()
@@ -187,6 +212,15 @@ class MainTab(ttk.Frame):
 
         sliders = ttk.LabelFrame(self, text="설정")
         sliders.pack(fill="x", padx=8, pady=8)
+
+        voice_row = ttk.Frame(sliders)
+        voice_row.pack(fill="x", padx=8, pady=4)
+        ttk.Label(voice_row, text="목소리", width=26).pack(side="left")
+        self.voice_var = tk.StringVar(value=self.app.settings["voice"])
+        self.voice_combo = ttk.Combobox(voice_row, textvariable=self.voice_var, state="readonly",
+                                         values=ktts.list_voices(SOUND_ROOT))
+        self.voice_combo.pack(side="left", fill="x", expand=True, padx=8)
+        self.voice_combo.bind("<<ComboboxSelected>>", lambda _evt: self.app.set_voice(self.voice_var.get()))
 
         s = self.app.settings
         self.speed_var = self._add_slider(sliders, "재생 속도", s["speed"], ktts.MIN_SPEED, ktts.MAX_SPEED,
@@ -231,7 +265,7 @@ class MainTab(ttk.Frame):
     def _build(self, text: str):
         groups = ktts.text_to_groups(text)
         return ktts.build_audio(
-            groups, SOUND_DIR,
+            groups, self.app.current_sound_dir(),
             gap_ms=int(self.app.settings["gap_ms"]),
             stop_gap_ms=int(self.app.settings["stop_gap_ms"]),
             speed=self.app.settings["speed"],
@@ -410,6 +444,8 @@ class TuningTab(ttk.Frame):
 
         top = ttk.Frame(self)
         top.pack(fill="x", padx=8, pady=8)
+        self.voice_label = ttk.Label(top, text=f"목소리: {self.app.settings['voice']}", foreground="#555")
+        self.voice_label.pack(side="left", padx=(0, 12))
         ttk.Label(top, text="검색:").pack(side="left")
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self._refresh_list())
@@ -504,11 +540,11 @@ class TuningTab(ttk.Frame):
         scale.pack(fill="x", padx=4, pady=(2, 4))
         return text_var
 
-    @staticmethod
-    def _list_sound_files() -> list:
-        if not os.path.isdir(SOUND_DIR):
+    def _list_sound_files(self) -> list:
+        sound_dir = self.app.current_sound_dir()
+        if not os.path.isdir(sound_dir):
             return []
-        return sorted(f[:-4] for f in os.listdir(SOUND_DIR) if f.lower().endswith(".wav"))
+        return sorted(f[:-4] for f in os.listdir(sound_dir) if f.lower().endswith(".wav"))
 
     def _refresh_list(self):
         query = self.search_var.get().strip().lower()
@@ -518,9 +554,21 @@ class TuningTab(ttk.Frame):
             marker = " *" if name in self.app.overrides else ""
             self.listbox.insert("end", name + marker)
 
+    def on_voice_changed(self):
+        """Called by App.set_voice(): this tab's file list, cached raw
+        samples, and current selection are all specific to the old voice."""
+        self._raw_cache.clear()
+        self.current_name = None
+        self.name_label.config(text="(선택 없음)")
+        self.voice_label.config(text=f"목소리: {self.app.settings['voice']}")
+        self.waveform.peaks = []
+        self.waveform.redraw()
+        self.all_names = self._list_sound_files()
+        self._refresh_list()
+
     def _load_raw(self, name):
         if name not in self._raw_cache:
-            path = os.path.join(SOUND_DIR, name + ".wav")
+            path = os.path.join(self.app.current_sound_dir(), name + ".wav")
             self._raw_cache[name] = ktts.read_sample(path) if os.path.exists(path) else None
         return self._raw_cache[name]
 
@@ -627,7 +675,7 @@ class TuningTab(ttk.Frame):
         override = self._current_override()
 
         def work():
-            path = os.path.join(SOUND_DIR, name + ".wav")
+            path = os.path.join(self.app.current_sound_dir(), name + ".wav")
             if not os.path.exists(path):
                 self.after(0, lambda: messagebox.showwarning("한국어 TTS", f"파일이 없습니다: {name}.wav"))
                 return
@@ -699,13 +747,14 @@ class TuningTab(ttk.Frame):
 
     def _save_all(self):
         self._commit()
+        path = self.app.overrides_path()
         try:
-            ktts.save_overrides(OVERRIDES_PATH, self.app.overrides)
+            ktts.save_overrides(path, self.app.overrides)
         except OSError as e:
             messagebox.showerror("한국어 TTS", f"저장 실패: {e}")
             return
         self._refresh_list()
-        self.status_label.config(text=f"저장됨: {OVERRIDES_PATH}")
+        self.status_label.config(text=f"저장됨: {path}")
 
 
 class BatchTab(ttk.Frame):
@@ -831,7 +880,7 @@ class BatchTab(ttk.Frame):
 
 
 if __name__ == "__main__":
-    if not os.path.isdir(SOUND_DIR):
-        print(f"음성 폴더가 없습니다: {SOUND_DIR}")
+    if not os.path.isdir(SOUND_ROOT):
+        print(f"음성 폴더가 없습니다: {SOUND_ROOT}")
         sys.exit(1)
     App().mainloop()

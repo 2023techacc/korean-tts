@@ -85,4 +85,21 @@ object Prefs {
             .putInt(KEY_STOP_GAP_MS, stopGapMs.coerceIn(MIN_STOP_GAP_MS, MAX_STOP_GAP_MS))
             .apply()
     }
+
+    // Which voice folder under assets/sound/ to read samples from - see
+    // AudioEngine.listVoices/DEFAULT_VOICE. Stored as plain text since the
+    // set of voices is whatever's bundled, not a fixed enum.
+    private const val KEY_VOICE = "voice"
+
+    fun getVoice(context: Context): String {
+        val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_VOICE, AudioEngine.DEFAULT_VOICE) ?: AudioEngine.DEFAULT_VOICE
+    }
+
+    fun setVoice(context: Context, voice: String) {
+        context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_VOICE, voice)
+            .apply()
+    }
 }

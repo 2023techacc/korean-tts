@@ -53,6 +53,24 @@ robocopy "%SRC%" "%DST_WEB%" *.wav /MIR /NDL /NJH
 if %ERRORLEVEL% GEQ 8 goto :robofail_web
 
 echo.
+echo === Writing docs\voices.json (voice list for the web version) ===
+REM The CLI/Android/exe can just list a folder to find voices at runtime;
+REM a static site can't, so this writes the list out as JSON instead.
+REM sound\ itself is always "default"; any subfolder with a .wav in it
+REM (narrator2\, etc - see TTS_README.txt's multi-voice section) is
+REM another voice.
+set "VOICES_JSON=%DST_WEB%\voices.json"
+> "%VOICES_JSON%" echo {
+>> "%VOICES_JSON%" echo   "voices": [
+set "FIRST=1"
+call :write_voice default
+for /d %%D in ("%SRC%\*") do call :maybe_write_voice "%%~fD"
+>> "%VOICES_JSON%" echo.
+>> "%VOICES_JSON%" echo   ]
+>> "%VOICES_JSON%" echo }
+echo   %VOICES_JSON%
+
+echo.
 echo Done.
 echo   - Android still needs a rebuild to pick this up:
 echo     Android Studio -^> Run, or Build ^> Build Bundle(s^) / APK(s^) -^> Build APK(s^)
@@ -60,6 +78,21 @@ echo   - The web version picks it up immediately (just refresh the page);
 echo     if it's already published, re-push/re-deploy to update the live site.
 echo   - The .exe bundles its own copy of sound\ too - rebuild it with
 echo     BUILD_EXE.txt's command if you want the change baked into the .exe.
+goto :eof
+
+:maybe_write_voice
+dir /a-d "%~1\*.wav" >nul 2>&1
+if errorlevel 1 goto :eof
+call :write_voice "%~n1"
+goto :eof
+
+:write_voice
+if "%FIRST%"=="1" (
+    set "FIRST=0"
+    >> "%VOICES_JSON%" echo     "%~1"
+) else (
+    >> "%VOICES_JSON%" echo     ,"%~1"
+)
 goto :eof
 
 :nosrc

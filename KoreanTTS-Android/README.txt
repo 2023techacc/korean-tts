@@ -111,6 +111,15 @@ Android Studio 없이 터미널/CI에서 빌드하기
     tts.py 의 --stop-gap 과 같은 값이고, "한국어로 읽기"에도 계속
     적용됩니다.
 
+목소리 선택 (여러 목소리를 넣었을 때)
+    메인 화면의 드롭다운에서 고릅니다. assets/sound/ 바로 아래가 항상
+    'default' 이고, 그 안의 폴더 하나가 목소리 하나입니다 (예:
+    assets/sound/narrator2/) - 자세한 건 ..\Allinone (2)\TTS_README.txt
+    의 "여러 목소리" 항목과 sync-sound-assets.bat 참고. 목소리를 하나만
+    쓰고 있다면 드롭다운에 'default' 하나만 보이고 신경 쓸 게 없습니다.
+    다른 목소리 폴더 이름은 밑줄(_)이나 마침표(.)로 시작하면 안 됩니다 -
+    안드로이드 빌드 도구가 그런 이름의 assets 폴더를 자동으로 빼버립니다.
+
 
 ====================================================
 5) 알려진 사항
@@ -185,8 +194,8 @@ Android Studio 없이 터미널/CI에서 빌드하기
         AudioEngine.kt       korean_tts.py 의 오디오 처리 로직 포팅
                             (WAV 로딩, 음량 보정, 크로스페이드, 받침 자르기)
         SpeechPlayer.kt      AudioTrack으로 재생하는 얇은 래퍼 (속도/볼륨 포함)
-        Prefs.kt             앱 설정 저장 (속도, 띄어쓰기 간격, 볼륨, 받침 뒤 간격)
-        MainActivity.kt      독립 실행 화면 (텍스트 입력 -> 재생/저장, 설정 슬라이더 4종)
+        Prefs.kt             앱 설정 저장 (속도, 띄어쓰기 간격, 볼륨, 받침 뒤 간격, 목소리)
+        MainActivity.kt      독립 실행 화면 (텍스트 입력 -> 재생/저장, 설정 슬라이더 4종 + 목소리 드롭다운)
         ProcessTextActivity.kt  선택한 텍스트 읽기 (핵심 기능)
     app/src/main/assets/sound/  음성 조각 268개 (.wav)
 

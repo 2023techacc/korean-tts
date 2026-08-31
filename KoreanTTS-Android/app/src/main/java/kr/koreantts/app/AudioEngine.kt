@@ -73,6 +73,40 @@ object AudioEngine {
     data class BuildResult(val samples: ShortArray, val missing: List<String>)
 
     // ------------------------------------------------------
+    // Multi-voice support
+    // ------------------------------------------------------
+    //
+    // assets/sound/*.wav is always the "default" voice, exactly as before.
+    // An additional voice is a subfolder under assets/sound/ with its own
+    // set of the same file names (assets/sound/narrator2/ga.wav, etc) - see
+    // korean_tts.py's matching list_voices/voice_dir for the full rationale.
+
+    const val DEFAULT_VOICE = "default"
+
+    private fun assetPath(voice: String, name: String): String =
+        if (voice == DEFAULT_VOICE) "sound/$name.wav" else "sound/$voice/$name.wav"
+
+    /**
+     * Voices bundled in assets/sound/: always [DEFAULT_VOICE], plus any
+     * subfolder name. AssetManager.list() on a leaf file returns an empty
+     * array, so - since every real sample name always ends in ".wav" and no
+     * voice folder ever will - anything listed that ISN'T a ".wav" name is
+     * a voice folder, with no need for a separate is-this-a-directory check.
+     */
+    fun listVoices(assets: AssetManager): List<String> {
+        val entries = try {
+            assets.list("sound") ?: emptyArray()
+        } catch (e: java.io.IOException) {
+            emptyArray()
+        }
+        val voices = mutableListOf(DEFAULT_VOICE)
+        for (entry in entries) {
+            if (!entry.endsWith(".wav", ignoreCase = true)) voices.add(entry)
+        }
+        return voices
+    }
+
+    // ------------------------------------------------------
     // WAV loading
     // ------------------------------------------------------
 
@@ -152,12 +186,13 @@ object AudioEngine {
     }
 
     /**
-     * Load "sound/$name.wav" from assets as mono 16-bit @ TARGET_RATE,
-     * trimmed and loudness-matched. Returns null if the asset doesn't exist.
+     * Load one sample for [voice] (see assetPath) from assets as mono
+     * 16-bit @ TARGET_RATE, trimmed and loudness-matched. Returns null if
+     * the asset doesn't exist.
      */
-    private fun readSample(assets: AssetManager, name: String, normalize: Boolean): ShortArray? {
+    private fun readSample(assets: AssetManager, name: String, normalize: Boolean, voice: String): ShortArray? {
         val bytes = try {
-            assets.open("sound/$name.wav").use { it.readBytes() }
+            assets.open(assetPath(voice, name)).use { it.readBytes() }
         } catch (e: java.io.IOException) {
             return null
         }
@@ -283,6 +318,7 @@ object AudioEngine {
         normalize: Boolean = true,
         crossfade: Boolean = true,
         stopGapMs: Int = DEFAULT_STOP_GAP_MS,
+        voice: String = DEFAULT_VOICE,
     ): BuildResult {
         val out = ArrayList<Short>(4096)
         val gap = ShortArray(TARGET_RATE * gapMs / 1000) // silence
@@ -293,7 +329,7 @@ object AudioEngine {
         var prevEndsInStop = false
 
         fun loadRaw(name: String): ShortArray? =
-            rawCache.getOrPut(name) { readSample(assets, name, normalize) }
+            rawCache.getOrPut(name) { readSample(assets, name, normalize, voice) }
 
         for (group in groups) {
             if (group.names == listOf(KoreanPhonology.PAUSE)) {

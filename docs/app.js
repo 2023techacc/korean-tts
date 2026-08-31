@@ -2,7 +2,8 @@ import { textToGroups, textToPronunciation } from "./korean-phonology.js";
 import { buildAudio, toWavBytes, DEFAULT_STOP_GAP_MS } from "./korean-audio.js";
 
 const SETTINGS_KEY = "koreantts_settings";
-const DEFAULT_SETTINGS = { speed: 1.0, gapMs: 300, volume: 1.0, stopGapMs: DEFAULT_STOP_GAP_MS };
+const DEFAULT_VOICE = "default";
+const DEFAULT_SETTINGS = { speed: 1.0, gapMs: 300, volume: 1.0, stopGapMs: DEFAULT_STOP_GAP_MS, voice: DEFAULT_VOICE };
 
 function loadSettings() {
   try {
@@ -32,6 +33,7 @@ const el = {
   btnSave: document.getElementById("btnSave"),
   pronOutput: document.getElementById("pronOutput"),
   status: document.getElementById("status"),
+  voice: document.getElementById("voice"),
   speed: document.getElementById("speed"),
   speedValue: document.getElementById("speedValue"),
   gap: document.getElementById("gap"),
@@ -68,6 +70,39 @@ for (const [input, key, transform] of [
   });
 }
 
+// sound/ itself is always the "default" voice; sound/voices.json (written
+// by sync-sound-assets.bat) lists any additional voice subfolders - see
+// korean_tts.py's list_voices for the same convention on the other
+// platforms. Missing/unreachable manifest just means "only default".
+async function initVoices() {
+  let voices = [DEFAULT_VOICE];
+  try {
+    const res = await fetch("sound/voices.json");
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.voices) && data.voices.length) voices = data.voices;
+    }
+  } catch {
+    // no manifest reachable - just the default voice
+  }
+
+  el.voice.innerHTML = "";
+  for (const v of voices) {
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = v;
+    el.voice.appendChild(opt);
+  }
+  if (!voices.includes(settings.voice)) settings.voice = DEFAULT_VOICE;
+  el.voice.value = settings.voice;
+}
+initVoices();
+
+el.voice.addEventListener("change", () => {
+  settings.voice = el.voice.value;
+  saveSettings(settings);
+});
+
 // --- audio playback plumbing ---
 
 let audioCtx = null;
@@ -80,7 +115,8 @@ let currentSource = null;
 
 async function loadSampleBuffer(name) {
   try {
-    const res = await fetch(`sound/${name}.wav`);
+    const path = settings.voice === DEFAULT_VOICE ? `sound/${name}.wav` : `sound/${settings.voice}/${name}.wav`;
+    const res = await fetch(path);
     if (!res.ok) return null;
     return await res.arrayBuffer();
   } catch {

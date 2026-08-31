@@ -132,6 +132,17 @@ input[type="range"] {
   width: 100%;
 }
 
+select {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--fg);
+  font-size: 0.95rem;
+  font-family: inherit;
+}
+
 .footnote {
   color: var(--muted);
   font-size: 0.8rem;
