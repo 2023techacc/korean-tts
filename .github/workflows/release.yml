@@ -1,9 +1,9 @@
 name: Release
 
-# Builds KoreanTTS.exe and the Android debug APK and attaches them to a
-# GitHub Release, so a release is "push a tag" instead of "rebuild both by
-# hand and drag files onto the Releases page" (see BUILD_EXE.txt /
-# KoreanTTS-Android/README.txt for what this automates).
+# Builds KoreanTTS.exe, VoiceRecorder.exe, and the Android debug APK and
+# attaches them to a GitHub Release, so a release is "push a tag" instead of
+# "rebuild everything by hand and drag files onto the Releases page" (see
+# BUILD_EXE.txt / KoreanTTS-Android/README.txt for what this automates).
 #
 # Two ways to run it:
 #   - Push a tag matching v* (e.g. `git tag v1.1.0 && git push origin v1.1.0`)
@@ -53,6 +53,20 @@ jobs:
           path: Allinone (2)/KoreanTTS.exe
           if-no-files-found: error
 
+      - name: Build VoiceRecorder.exe
+        working-directory: Allinone (2)
+        shell: pwsh
+        run: |
+          py -m PyInstaller --onefile --windowed --name VoiceRecorder `
+            --distpath . --workpath build_temp_vr --specpath build_temp_vr `
+            --noconfirm voice_recorder.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VoiceRecorder-exe
+          path: Allinone (2)/VoiceRecorder.exe
+          if-no-files-found: error
+
   build-apk:
     runs-on: ubuntu-latest
     steps:
@@ -95,4 +109,5 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/KoreanTTS-exe/KoreanTTS.exe
+            artifacts/VoiceRecorder-exe/VoiceRecorder.exe
             artifacts/KoreanTTS-apk/app-debug.apk

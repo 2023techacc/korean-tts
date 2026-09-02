@@ -26,6 +26,15 @@ KoreanTTS.exe 는 gui.py 를 PyInstaller 로 패키징한 것입니다. 다시 �
 아니라 --distpath . 로 지정했기 때문). build_temp/ 는 중간 빌드 파일이라
 지워도 안전합니다.
 
+2-1) VoiceRecorder.exe (새 목소리 녹음 도구)
+---------------------------------------------
+사용법은 VOICE_RECORDER_README.txt 참고. sound/ 를 읽지 않고 새로
+녹음하기만 하므로 --add-data 가 필요 없습니다:
+
+    py -m PyInstaller --onefile --windowed --name VoiceRecorder ^
+        --distpath . --workpath build_temp --specpath build_temp ^
+        --noconfirm voice_recorder.py
+
 이 폴더에 .exe 를 두는 이유
 ----------------------------
 gui.py 의 "고급 설정" 탭에서 저장하는 sound_overrides.json 은 exe 파일
@@ -83,11 +92,25 @@ gui.py 의 "고급 설정" 탭에서 저장하는 sound_overrides.json 은 exe �
   처음 실행할 때 버튼/슬라이더/드래그가 실제로 기대대로 동작하는지 한 번
   확인해보세요.
 
+VoiceRecorder.exe 확인한 사항
+------------------------------
+- 실제 마이크로 두 번 따로 녹음해서 매번 다른(진짜 살아있는) 오디오가
+  잡히는 것을 바이트 단위로 확인 (정적/캐시된 값이 아님).
+- 녹음 -> 저장 -> korean_tts.read_sample() 로 다시 읽기까지 전체 흐름을
+  실제 마이크 입력으로 검증.
+- 이어하기(resume) 기능: 한 항목을 녹음/저장한 뒤 앱을 새로 시작해도
+  이미 끝난 항목은 건너뛰고 다음 항목부터 이어지는 것을 확인.
+- 마이크가 없을 때의 대체 동작(녹음 버튼만 비활성화, 목록/글자는 계속
+  보임)을 실제로 마이크를 "없음" 상태로 흉내 내어 확인.
+- "얼린(frozen)" 상태를 흉내 낸 테스트로, 녹음 파일이 exe 옆의 sound\
+  폴더에 저장되는 것을 코드로 확인 (KoreanTTS.exe와 같은 이유).
+- 빌드된 exe를 직접 실행해서 5초 이상 정상적으로 떠 있는 것을 확인.
+
 자동 빌드 (GitHub Releases)
 ----------------------------
 이 저장소를 GitHub에 올려두면, 위 명령을 손으로 칠 필요 없이
-.github/workflows/release.yml 이 자동으로 KoreanTTS.exe 와 Android APK를
-빌드해서 GitHub Release 초안(draft)으로 올려줍니다.
+.github/workflows/release.yml 이 자동으로 KoreanTTS.exe, VoiceRecorder.exe,
+Android APK를 빌드해서 GitHub Release 초안(draft)으로 올려줍니다.
 
     git tag v1.0.0
     git push origin v1.0.0

@@ -22,6 +22,7 @@ data/
 # Built by PyInstaller (see BUILD_EXE.txt) - distributed via GitHub Releases,
 # not committed; rebuild locally with the command in BUILD_EXE.txt.
 KoreanTTS.exe
+VoiceRecorder.exe
 build_temp/
 *.spec
 

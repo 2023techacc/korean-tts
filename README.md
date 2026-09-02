@@ -33,6 +33,8 @@ This repo tracks the TTS work only — a combined Discord bot (Pokémon RPG / mu
 
 `sound/` itself is always the "default" voice. A subfolder with the same 268 file names (`sound/narrator2/ga.wav`, etc.) is an additional voice, selectable in every interface (`--voice`/`--list-voices` on the CLI, a dropdown in the desktop app/Android/web) — see [`Allinone (2)/TTS_README.txt`](Allinone%20%282%29/TTS_README.txt)'s "여러 목소리" section for the full picture, including per-voice fine-tuning files and an Android-specific naming gotcha (folder names can't start with `_` or `.`).
 
+Recording one: **`VoiceRecorder.exe`** (`Allinone (2)/voice_recorder.py`) walks through the 253 sample names the phonology engine actually uses, shows the real Korean character to say for each (mic capture via raw `winmm.dll` through ctypes — no extra dependency), and saves accepted takes straight into `sound/<name>/` — no separate conversion step, it's immediately usable everywhere above. See [`Allinone (2)/VOICE_RECORDER_README.txt`](Allinone%20%282%29/VOICE_RECORDER_README.txt).
+
 `sound/` is duplicated three times (CLI, Android assets, web) because each platform needs its own bundled copy. After changing/re-recording a sample, or adding a voice folder, run:
 
 ```
@@ -46,7 +48,7 @@ from the repo root. It checks the CLI copy for missing/renamed files, mirrors it
 - **CLI**: nothing to build, just `py tts.py`.
 - **.exe**: see [`Allinone (2)/BUILD_EXE.txt`](Allinone%20%282%29/BUILD_EXE.txt) for the PyInstaller command.
 - **Android**: `cd KoreanTTS-Android && ./gradlew assembleDebug` (or open in Android Studio) — see [`KoreanTTS-Android/README.txt`](KoreanTTS-Android/README.txt).
-- **Both, automatically**: push a tag matching `v*` (e.g. `git tag v1.0.0 && git push origin v1.0.0`), or run the *Release* workflow manually from the Actions tab. It builds both and opens a draft GitHub Release with them attached — review and publish it yourself.
+- **All three, automatically**: push a tag matching `v*` (e.g. `git tag v1.0.0 && git push origin v1.0.0`), or run the *Release* workflow manually from the Actions tab. It builds `KoreanTTS.exe`, `VoiceRecorder.exe`, and the APK, and opens a draft GitHub Release with them attached — review and publish it yourself.
 
 ## If you change the engine
 
