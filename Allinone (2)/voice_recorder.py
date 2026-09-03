@@ -198,8 +198,7 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _refresh_voice_list(self):
-        existing = [v for v in ktts.list_voices(SOUND_ROOT) if v != ktts.DEFAULT_VOICE]
-        self.voice_combo["values"] = existing
+        self.voice_combo["values"] = ktts.list_voices(SOUND_ROOT)
 
     # ------------------------------------------------------
     # Voice / navigation
@@ -208,10 +207,7 @@ class App(tk.Tk):
     def _load_voice(self):
         name = self.voice.get().strip()
         if not name:
-            messagebox.showinfo("한국어 TTS", "목소리 이름을 입력하세요 (예: narrator2).")
-            return
-        if name == ktts.DEFAULT_VOICE:
-            messagebox.showwarning("한국어 TTS", "'default'는 원래 목소리 이름이라 다른 이름을 쓰세요.")
+            messagebox.showinfo("한국어 TTS", "목소리 이름을 입력하세요 (예: narrator2, 또는 기존 목소리를 고쳐 쓰려면 default).")
             return
         invalid = set(name) & set('\\/:*?"<>| ')
         if name.startswith(("_", ".")) or invalid:
