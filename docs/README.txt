@@ -18,7 +18,9 @@ korean-audio.js     - 오디오 조립 엔진 (korean_tts.py의 JS 이식판,
                        단 .exe에만 있는 "세부 튜닝(overrides)" 기능은
                        웹 버전에는 없습니다 - CLI/APK와 동일한 기본
                        기능만 포함)
-sound/               - 발음 조각 .wav 파일 268개 (Allinone (2)\sound의 복사본)
+sound/               - 발음 조각 .wav 파일 (Allinone (2)\sound의 복사본).
+                       목소리별 하위 폴더 (기본은 sound/default/) +
+                       voices.json (아래 "여러 목소리" 참고)
 tests/               - 개발용 자동 테스트 (파이썬 엔진과 결과가 정확히
                        일치하는지 확인하는 스크립트들). 사이트 동작에는
                        필요 없지만 나중에 엔진을 고칠 때 참고용으로

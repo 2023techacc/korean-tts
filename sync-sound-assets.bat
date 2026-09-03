@@ -81,6 +81,7 @@ echo     BUILD_EXE.txt's command if you want the change baked into the .exe.
 goto :eof
 
 :maybe_write_voice
+if /i "%~n1"=="default" goto :eof
 dir /a-d "%~1\*.wav" >nul 2>&1
 if errorlevel 1 goto :eof
 call :write_voice "%~n1"

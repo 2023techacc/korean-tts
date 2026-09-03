@@ -31,7 +31,7 @@ This repo tracks the TTS work only — a combined Discord bot (Pokémon RPG / mu
 
 ## Voices
 
-`sound/` itself is always the "default" voice. A subfolder with the same 268 file names (`sound/narrator2/ga.wav`, etc.) is an additional voice, selectable in every interface (`--voice`/`--list-voices` on the CLI, a dropdown in the desktop app/Android/web) — see [`Allinone (2)/TTS_README.txt`](Allinone%20%282%29/TTS_README.txt)'s "여러 목소리" section for the full picture, including per-voice fine-tuning files and an Android-specific naming gotcha (folder names can't start with `_` or `.`).
+Every voice, including the original recordings, is a same-named subfolder under `sound/` — the original voice is `sound/default/`, an additional one is `sound/narrator2/` (same 268 file names), selectable in every interface (`--voice`/`--list-voices` on the CLI, a dropdown in the desktop app/Android/web) — see [`Allinone (2)/TTS_README.txt`](Allinone%20%282%29/TTS_README.txt)'s "여러 목소리" section for the full picture, including per-voice fine-tuning files and an Android-specific naming gotcha (folder names can't start with `_` or `.`).
 
 Recording one: **`VoiceRecorder.exe`** (`Allinone (2)/voice_recorder.py`) walks through the 253 sample names the phonology engine actually uses, shows the real Korean character to say for each (mic capture via raw `winmm.dll` through ctypes — no extra dependency), and saves accepted takes straight into `sound/<name>/` — no separate conversion step, it's immediately usable everywhere above. See [`Allinone (2)/VOICE_RECORDER_README.txt`](Allinone%20%282%29/VOICE_RECORDER_README.txt).
 

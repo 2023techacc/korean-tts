@@ -556,12 +556,10 @@ DEFAULT_OVERRIDES_FILENAME = "sound_overrides.json"
 # Multi-voice support
 # ------------------------------------------------------
 #
-# sound/ (whatever a caller's sound_dir/sound_root points at) is always the
-# "default" voice, exactly as before - existing setups need no changes at
-# all. An additional voice is just a subfolder of the same name containing
-# its own full (or partial - missing files just get reported the same way
-# a missing default-voice file always has) set of the same 268 sample names,
-# e.g. sound/narrator2/ga.wav. Nothing else about build_audio changes: a
+# Every voice, including the original recordings, is a same-named subfolder
+# of sound_root - sound/default/ga.wav, sound/narrator2/ga.wav, etc. A
+# voice can be partial (missing files just get reported the same way a
+# missing sample always has). Nothing else about build_audio changes: a
 # voice is resolved to a directory via voice_dir() before it's ever passed
 # in as sound_dir.
 
@@ -569,14 +567,15 @@ DEFAULT_VOICE = "default"
 
 
 def list_voices(sound_root: str) -> list:
-    """Voices available under `sound_root`: always DEFAULT_VOICE (the flat
-    files directly in sound_root, whether or not any exist yet), plus any
-    immediate subdirectory that contains at least one .wav file."""
-    voices = [DEFAULT_VOICE]
+    """Voices available under `sound_root`: every immediate subdirectory
+    that contains at least one .wav file (sound_root/default/, sound_root/
+    narrator2/, ...) - DEFAULT_VOICE always first if present, since every
+    interface's voice picker expects it there."""
+    voices = []
     try:
         entries = sorted(os.listdir(sound_root))
     except OSError:
-        return voices
+        entries = []
     for name in entries:
         path = os.path.join(sound_root, name)
         if not os.path.isdir(path):
@@ -587,15 +586,18 @@ def list_voices(sound_root: str) -> list:
             has_wav = False
         if has_wav:
             voices.append(name)
+    if DEFAULT_VOICE in voices:
+        voices.remove(DEFAULT_VOICE)
+        voices.insert(0, DEFAULT_VOICE)
+    elif not voices:
+        voices = [DEFAULT_VOICE]  # nothing recorded yet - still offer it as a target
     return voices
 
 
 def voice_dir(sound_root: str, voice: str) -> str:
-    """The actual sample directory for `voice` under `sound_root` - itself
-    for DEFAULT_VOICE (or an empty/None voice), a subfolder otherwise."""
-    if not voice or voice == DEFAULT_VOICE:
-        return sound_root
-    return os.path.join(sound_root, voice)
+    """The actual sample directory for `voice` under `sound_root` - always
+    a subfolder, including for DEFAULT_VOICE (sound_root/default/)."""
+    return os.path.join(sound_root, voice or DEFAULT_VOICE)
 
 
 def overrides_path_for_voice(base_path: str, voice: str) -> str:

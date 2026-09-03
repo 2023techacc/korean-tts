@@ -5,7 +5,7 @@ import { buildAudio } from "../korean-audio.js";
 import { textToGroups } from "../korean-phonology.js";
 
 const ref = JSON.parse(readFileSync(new URL("./audio_options_reference.json", import.meta.url)));
-const SOUND_DIR = new URL("../sound/", import.meta.url);
+const SOUND_DIR = new URL("../sound/default/", import.meta.url);
 
 async function loadSampleBuffer(name) {
   const path = new URL(`${name}.wav`, SOUND_DIR);

@@ -115,8 +115,7 @@ let currentSource = null;
 
 async function loadSampleBuffer(name) {
   try {
-    const path = settings.voice === DEFAULT_VOICE ? `sound/${name}.wav` : `sound/${settings.voice}/${name}.wav`;
-    const res = await fetch(path);
+    const res = await fetch(`sound/${settings.voice}/${name}.wav`);
     if (!res.ok) return null;
     return await res.arrayBuffer();
   } catch {
