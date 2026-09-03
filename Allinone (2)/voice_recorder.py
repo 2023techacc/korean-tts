@@ -84,6 +84,17 @@ def build_prompt_map() -> dict:
     return examples
 
 
+def _peak_level(pcm: bytes) -> int:
+    """Max absolute 16-bit sample value in `pcm` - a quick way to tell a
+    real recording from near-silence (muted mic, wrong input device, or
+    Windows blocking this app's microphone access at the OS level)."""
+    import array
+
+    samples = array.array("h")
+    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    return max((abs(s) for s in samples), default=0)
+
+
 def to_wav_bytes(pcm: bytes) -> bytes:
     import io
     import wave
@@ -156,7 +167,7 @@ class App(tk.Tk):
         self.name_label = ttk.Label(main, text="", foreground="#888")
         self.name_label.pack()
 
-        self.status_label = ttk.Label(main, text="", foreground="#0a0")
+        self.status_label = ttk.Label(main, text="", foreground="#0a0", wraplength=440, justify="left")
         self.status_label.pack(pady=8)
 
         btns = ttk.Frame(main)
@@ -297,7 +308,17 @@ class App(tk.Tk):
                 self.accept_btn.config(state="disabled")
                 return
             self.current_take = pcm
-            self.status_label.config(text=f"녹음됨 ({len(pcm) / (mic_record.TARGET_RATE * mic_record.SAMPLE_WIDTH):.2f}초) - 들어보고 저장하세요.")
+            duration = len(pcm) / (mic_record.TARGET_RATE * mic_record.SAMPLE_WIDTH)
+            peak = _peak_level(pcm)
+            warn = ""
+            if peak < 300:
+                warn = ("  ⚠ 소리가 거의 감지되지 않았습니다 (최고 음량 "
+                        f"{peak}/32767) - 마이크가 음소거되어 있거나, Windows 설정에서 "
+                        "이 앱의 마이크 접근이 꺼져 있을 수 있습니다. 자세한 확인 방법은 "
+                        "VOICE_RECORDER_README.txt의 '소리가 안 들릴 때' 참고.")
+            self.status_label.config(
+                text=f"녹음됨 ({duration:.2f}초, 최고 음량 {peak}/32767) - 들어보고 저장하세요.{warn}"
+            )
             self.preview_btn.config(state="normal")
             self.accept_btn.config(state="normal")
 
@@ -309,8 +330,13 @@ class App(tk.Tk):
         def work():
             try:
                 ktts.play(wav_bytes)
-            except ktts.AudioError:
-                pass
+            except Exception as e:
+                # korean_tts.play()'s Windows path calls winsound.PlaySound
+                # with no try/except of its own, so a real failure there
+                # surfaces as a plain RuntimeError, not ktts.AudioError -
+                # catch everything so a playback problem is never silently
+                # invisible (this runs in a --windowed exe with no console).
+                self.after(0, lambda: self.status_label.config(text=f"재생 실패: {e}"))
 
         threading.Thread(target=work, daemon=True).start()
 
