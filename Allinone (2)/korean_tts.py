@@ -896,11 +896,19 @@ def apply_override(samples: array.array, override: dict) -> array.array:
     return samples
 
 
-def read_sample(path: str, normalize: bool = True, override: dict = None, audio_settings=None) -> array.array:
+def read_sample(path: str, normalize: bool = True, trim: bool = True, override: dict = None,
+                 audio_settings=None) -> array.array:
     """Load a .wav as mono 16-bit @ TARGET_RATE, trimmed and loudness-matched,
     then optionally fine-tuned further per `override` (see apply_override).
     `audio_settings` (an AudioSettings, see below) supplies the trim
-    threshold / loudness targets - defaults to today's global constants."""
+    threshold / loudness targets - defaults to today's global constants.
+
+    `trim=False` skips the automatic silence trim (leaving `normalize`
+    independently controllable, as it already was) - for a caller that wants
+    the file's true as-recorded content unmodified by either automatic step,
+    e.g. a destructive file editor that must show/edit exactly what's on
+    disk rather than what the playback pipeline would additionally do to it.
+    Every existing caller omits this, keeping today's default (True)."""
     settings = audio_settings if audio_settings is not None else AudioSettings()
     with wave.open(path, "rb") as w:
         channels = w.getnchannels()
@@ -924,7 +932,8 @@ def read_sample(path: str, normalize: bool = True, override: dict = None, audio_
         )
 
     samples = _resample(samples, rate)
-    samples = trim_silence(samples, threshold=settings.silence_threshold)
+    if trim:
+        samples = trim_silence(samples, threshold=settings.silence_threshold)
     if normalize:
         samples = normalize_loudness(
             samples,

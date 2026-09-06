@@ -16,7 +16,9 @@ on any other OS, or if no microphone is found, this still runs as a
 prompt-list viewer (see PromptTab) so it's still useful without a mic.
 """
 
+import array
 import os
+import shutil
 import sys
 import threading
 import tkinter as tk
@@ -199,11 +201,110 @@ def to_wav_bytes(pcm: bytes) -> bytes:
     return buf.getvalue()
 
 
+# ------------------------------------------------------
+# Waveform trim editor (same widget as gui.py's TuningTab - duplicated
+# rather than shared, matching this project's existing convention of each
+# standalone tool staying self-contained, e.g. _compose above already
+# duplicates korean_tts._compose rather than importing gui.py)
+# ------------------------------------------------------
+
+class WaveformEditor(tk.Canvas):
+    """Visual trim editor: draws the sample's waveform with the trimmed-away
+    start/end regions shaded out, and lets the user drag either edge marker
+    directly instead of guessing millisecond values on a blind slider.
+    """
+
+    WIDTH = 460
+    HEIGHT = 100
+    MIN_GAP_MS = 20  # never let the two markers cross closer than this
+
+    def __init__(self, parent, on_drag):
+        super().__init__(parent, width=self.WIDTH, height=self.HEIGHT, background="#1e1e1e", highlightthickness=1,
+                          highlightbackground="#888")
+        self.on_drag = on_drag  # callback(start_ms, end_ms)
+        self.peaks = []
+        self.duration_ms = 0.0
+        self.trim_start_ms = 0.0
+        self.trim_end_ms = 0.0
+        self._dragging = None
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<B1-Motion>", self._on_motion)
+
+    def load(self, samples):
+        n = len(samples)
+        self.duration_ms = (n / ktts.TARGET_RATE) * 1000 if n else 0.0
+        width = self.WIDTH
+        peaks = []
+        for x in range(width):
+            start = n * x // width
+            end = max(start + 1, n * (x + 1) // width)
+            chunk = samples[start:end]
+            peaks.append(max((abs(v) for v in chunk), default=0))
+        self.peaks = peaks
+
+    def set_trim(self, start_ms, end_ms):
+        self.trim_start_ms = start_ms
+        self.trim_end_ms = end_ms
+        self.redraw()
+
+    def redraw(self):
+        self.delete("all")
+        if not self.peaks or self.duration_ms <= 0:
+            self.create_text(self.WIDTH // 2, self.HEIGHT // 2, text="(선택 없음)", fill="#888")
+            return
+
+        px_start = self._ms_to_px(self.trim_start_ms)
+        px_end = self._ms_to_px(max(self.trim_start_ms, self.duration_ms - self.trim_end_ms))
+
+        self.create_rectangle(0, 0, px_start, self.HEIGHT, fill="#3a1e1e", outline="")
+        self.create_rectangle(px_end, 0, self.WIDTH, self.HEIGHT, fill="#3a1e1e", outline="")
+        self.create_rectangle(px_start, 0, px_end, self.HEIGHT, fill="#1e2e1e", outline="")
+
+        mid = self.HEIGHT // 2
+        scale = (self.HEIGHT / 2 - 4) / 32768
+        for x, peak in enumerate(self.peaks):
+            h = peak * scale
+            self.create_line(x, mid - h, x, mid + h, fill="#6fcf97")
+
+        self.create_line(px_start, 0, px_start, self.HEIGHT, fill="#4d84ff", width=2)
+        self.create_line(px_end, 0, px_end, self.HEIGHT, fill="#4d84ff", width=2)
+        self.create_rectangle(px_start - 4, 0, px_start + 4, 10, fill="#4d84ff", outline="")
+        self.create_rectangle(px_end - 4, 0, px_end + 4, 10, fill="#4d84ff", outline="")
+
+    def _ms_to_px(self, ms):
+        return max(0, min(self.WIDTH, (ms / self.duration_ms) * self.WIDTH)) if self.duration_ms else 0
+
+    def _px_to_ms(self, px):
+        return max(0.0, min(self.duration_ms, (px / self.WIDTH) * self.duration_ms))
+
+    def _on_press(self, event):
+        if not self.duration_ms:
+            return
+        px_start = self._ms_to_px(self.trim_start_ms)
+        px_end = self._ms_to_px(self.duration_ms - self.trim_end_ms)
+        self._dragging = "start" if abs(event.x - px_start) <= abs(event.x - px_end) else "end"
+        self._on_motion(event)
+
+    def _on_motion(self, event):
+        if not self._dragging or not self.duration_ms:
+            return
+        ms = self._px_to_ms(event.x)
+        if self._dragging == "start":
+            max_start = max(0.0, self.duration_ms - self.trim_end_ms - self.MIN_GAP_MS)
+            self.trim_start_ms = max(0.0, min(ms, max_start))
+        else:
+            end_ms = self.duration_ms - ms
+            max_end = max(0.0, self.duration_ms - self.trim_start_ms - self.MIN_GAP_MS)
+            self.trim_end_ms = max(0.0, min(end_ms, max_end))
+        self.redraw()
+        self.on_drag(self.trim_start_ms, self.trim_end_ms)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("한국어 TTS - 목소리 녹음")
-        self.geometry("760x640")
+        self.geometry("1220x700")
 
         self.prompts = {}
         self.names = []
@@ -217,6 +318,16 @@ class App(tk.Tk):
         self.current_take = None  # bytes of the just-recorded, not-yet-saved take
         self.recorder = None
         self.recording = False
+
+        # Destructive file-editing panel state (see _build_edit_panel) - edits
+        # the CURRENTLY SELECTED item's .wav directly, not a synthesis-time
+        # override. Sliders always represent "change to apply on top of
+        # what's on disk right now", reset to 0 after every apply/revert/
+        # selection change - they're never a memory of past edits.
+        self.edit_gain_var = tk.DoubleVar(value=0.0)
+        self.edit_trim_start_var = tk.DoubleVar(value=0.0)
+        self.edit_trim_end_var = tk.DoubleVar(value=0.0)
+        self._edit_raw_cache = None  # (name, samples) for the currently loaded waveform
 
         self._build_ui()
         self._refresh_voice_list()
@@ -309,6 +420,11 @@ class App(tk.Tk):
         # Populated once a bank is opened (_open_bank -> _refresh_done_markers) -
         # self.names is empty until then, since which items exist depends on
         # the bank's type.
+
+        # Packed side="right" (and BEFORE `main` below, which expands to fill
+        # whatever's left) so this panel keeps a fixed-width column instead
+        # of being squeezed out by main's expand=True.
+        self._build_edit_panel(body)
 
         main = ttk.Frame(body)
         main.pack(side="left", fill="both", expand=True, padx=16)
@@ -506,6 +622,12 @@ class App(tk.Tk):
         except OSError as e:
             messagebox.showerror("한국어 TTS", f"저장 실패: {e}")
             return
+        backup_path = path[:-4] + ".orig"  # see _accept_and_next's comment: stale backup, new take
+        if os.path.exists(backup_path):
+            try:
+                os.remove(backup_path)
+            except OSError:
+                pass
 
         manifest = ktts.load_bank_manifest(self.voice_dir)
         settings = manifest.setdefault("settings", {})
@@ -546,6 +668,7 @@ class App(tk.Tk):
         self.listbox.selection_clear(0, "end")
         self.listbox.selection_set(self.index)
         self.listbox.see(self.index)
+        self._refresh_edit_panel()
 
     def _on_list_select(self, _evt=None):
         selection = self.listbox.curselection()
@@ -565,6 +688,225 @@ class App(tk.Tk):
             return
         self.index = (self.index + 1) % len(self.names)
         self._show_current()
+
+    # ------------------------------------------------------
+    # File editing (destructive - edits the CURRENTLY SELECTED item's own
+    # .wav directly, unlike gui.py's TuningTab which only ever writes a
+    # synthesis-time override to sound_overrides.json and never touches the
+    # recording itself). Every edit backs up the pre-edit file to
+    # <name>.orig the first time (never overwritten again, so it always
+    # holds the true original take) so "되돌리기" can always restore it.
+    # ------------------------------------------------------
+
+    def _build_edit_panel(self, parent):
+        frame = ttk.LabelFrame(parent, text="다듬기 (선택한 파일 자체를 바꿈)")
+        frame.pack(side="right", fill="y", padx=(8, 0))
+        self.edit_frame = frame
+
+        self.edit_name_label = ttk.Label(frame, text="(선택 없음)", font=("", 11, "bold"))
+        self.edit_name_label.pack(anchor="w", padx=8, pady=8)
+
+        ttk.Label(frame, text="파형 (드래그해서 자르기 구간 조절)").pack(anchor="w", padx=8)
+        self.edit_waveform = WaveformEditor(frame, on_drag=self._on_edit_waveform_drag)
+        self.edit_waveform.pack(padx=8, pady=(0, 8))
+        self.edit_waveform.redraw()
+
+        self.edit_gain_text = tk.StringVar(value="음량 보정: +0.0dB")
+        ttk.Label(frame, textvariable=self.edit_gain_text).pack(anchor="w", padx=8)
+        ttk.Scale(frame, from_=-12, to=12, orient="horizontal", variable=self.edit_gain_var,
+                  command=self._on_edit_gain_change, length=300).pack(padx=8, pady=4, fill="x")
+
+        self.edit_trim_start_text = tk.StringVar(value="시작 자르기: 0ms")
+        ttk.Label(frame, textvariable=self.edit_trim_start_text).pack(anchor="w", padx=8)
+        ttk.Scale(frame, from_=0, to=200, orient="horizontal", variable=self.edit_trim_start_var,
+                  command=self._on_edit_trim_change, length=300).pack(padx=8, pady=4, fill="x")
+
+        self.edit_trim_end_text = tk.StringVar(value="끝 자르기: 0ms")
+        ttk.Label(frame, textvariable=self.edit_trim_end_text).pack(anchor="w", padx=8)
+        ttk.Scale(frame, from_=0, to=200, orient="horizontal", variable=self.edit_trim_end_var,
+                  command=self._on_edit_trim_change, length=300).pack(padx=8, pady=4, fill="x")
+
+        btns1 = ttk.Frame(frame)
+        btns1.pack(fill="x", padx=8, pady=(8, 2))
+        ttk.Button(btns1, text="▶ 적용 시 미리듣기", command=self._preview_edit).pack(side="left")
+        ttk.Button(btns1, text="▶ 저장된 파일 그대로 듣기", command=self._preview_edit_original).pack(
+            side="left", padx=8
+        )
+
+        btns2 = ttk.Frame(frame)
+        btns2.pack(fill="x", padx=8, pady=(2, 8))
+        ttk.Button(btns2, text="적용 (파일에 저장)", command=self._apply_edit).pack(side="left")
+        ttk.Button(btns2, text="되돌리기 (원본 복원)", command=self._revert_edit).pack(side="left", padx=8)
+
+        self.edit_status_label = ttk.Label(frame, text="", foreground="#888", wraplength=440, justify="left")
+        self.edit_status_label.pack(anchor="w", padx=8, pady=(0, 4))
+
+        note = ("여기서 하는 편집은 sound_overrides.json이 아니라 실제 .wav 파일 자체를 바꿉니다 - "
+                "이 목소리를 쓰는 모든 곳에 바로 반영됩니다. 처음 적용할 때 원본을 <이름>.orig 로 "
+                "자동 백업하므로(여러 번 적용해도 최초 원본만 보관) '되돌리기'로 언제든 복원할 수 "
+                "있습니다. 이음매 타이밍(교차 길이 등)처럼 파일 하나만으로는 바꿀 수 없는 설정은 "
+                "여기 없습니다 - 그건 데스크톱 앱(gui.py/KoreanTTS.exe)의 고급 설정 탭에서 "
+                "sound_overrides.json 으로 계속 다룹니다.")
+        ttk.Label(frame, text=note, wraplength=440, foreground="#888").pack(anchor="w", padx=8, pady=(0, 8))
+
+    def _sync_edit_labels(self):
+        self.edit_gain_text.set(f"음량 보정: {self.edit_gain_var.get():+.1f}dB")
+        self.edit_trim_start_text.set(f"시작 자르기: {int(self.edit_trim_start_var.get())}ms")
+        self.edit_trim_end_text.set(f"끝 자르기: {int(self.edit_trim_end_var.get())}ms")
+
+    def _on_edit_gain_change(self, _v):
+        self._sync_edit_labels()
+
+    def _on_edit_trim_change(self, _v):
+        self._sync_edit_labels()
+        self.edit_waveform.set_trim(self.edit_trim_start_var.get(), self.edit_trim_end_var.get())
+
+    def _on_edit_waveform_drag(self, start_ms, end_ms):
+        self.edit_trim_start_var.set(round(start_ms))
+        self.edit_trim_end_var.set(round(end_ms))
+        self._sync_edit_labels()
+
+    def _refresh_edit_panel(self):
+        self.edit_gain_var.set(0.0)
+        self.edit_trim_start_var.set(0.0)
+        self.edit_trim_end_var.set(0.0)
+        self._sync_edit_labels()
+
+        if not hasattr(self, "voice_dir") or not self.names:
+            self.edit_name_label.config(text="(선택 없음)")
+            self._edit_raw_cache = None
+            self.edit_waveform.peaks = []
+            self.edit_waveform.redraw()
+            self.edit_status_label.config(text="")
+            return
+
+        name = self._current_name()
+        self.edit_name_label.config(text=name)
+        path = os.path.join(self.voice_dir, name + ".wav")
+        if not os.path.exists(path):
+            self._edit_raw_cache = None
+            self.edit_waveform.peaks = []
+            self.edit_waveform.redraw()
+            self.edit_status_label.config(text="아직 녹음되지 않았습니다.")
+            return
+
+        try:
+            raw = ktts.read_sample(path, normalize=False, trim=False)
+        except Exception as e:
+            self._edit_raw_cache = None
+            self.edit_waveform.peaks = []
+            self.edit_waveform.redraw()
+            self.edit_status_label.config(text=f"불러오기 실패: {e}")
+            return
+
+        self._edit_raw_cache = (name, raw)
+        self.edit_waveform.load(raw)
+        self.edit_waveform.set_trim(0.0, 0.0)
+        backup_path = path[:-4] + ".orig"
+        self.edit_status_label.config(text="원본 백업 있음 (되돌리기 가능)" if os.path.exists(backup_path) else "")
+
+    def _current_edit_override(self) -> dict:
+        override = {}
+        gain = round(self.edit_gain_var.get(), 1)
+        if gain:
+            override["gain_db"] = gain
+        start_ms = int(self.edit_trim_start_var.get())
+        if start_ms:
+            override["trim_start_ms"] = start_ms
+        end_ms = int(self.edit_trim_end_var.get())
+        if end_ms:
+            override["trim_end_ms"] = end_ms
+        return override
+
+    def _preview_edit(self):
+        if not self._edit_raw_cache:
+            return
+        _name, raw = self._edit_raw_cache
+        override = self._current_edit_override()
+        samples = ktts.apply_override(array.array("h", raw), override)
+        wav_bytes = ktts.to_wav_bytes(samples)
+
+        def work():
+            try:
+                ktts.play(wav_bytes)
+            except Exception as e:
+                self.after(0, lambda: self.edit_status_label.config(text=f"재생 실패: {e}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _preview_edit_original(self):
+        if not hasattr(self, "voice_dir") or not self.names:
+            return
+        name = self._current_name()
+        path = os.path.join(self.voice_dir, name + ".wav")
+        if not os.path.exists(path):
+            return
+
+        def work():
+            try:
+                with open(path, "rb") as f:
+                    ktts.play(f.read())
+            except Exception as e:
+                self.after(0, lambda: self.edit_status_label.config(text=f"재생 실패: {e}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_edit(self):
+        if not hasattr(self, "voice_dir") or not self.names:
+            return
+        name = self._current_name()
+        path = os.path.join(self.voice_dir, name + ".wav")
+        if not os.path.exists(path):
+            messagebox.showinfo("한국어 TTS", "이 항목은 아직 녹음되지 않았습니다.")
+            return
+        override = self._current_edit_override()
+        if not override:
+            messagebox.showinfo("한국어 TTS", "적용할 변경 사항이 없습니다 (슬라이더를 움직여보세요).")
+            return
+
+        try:
+            raw = ktts.read_sample(path, normalize=False, trim=False)
+        except Exception as e:
+            messagebox.showerror("한국어 TTS", f"읽기 실패: {e}")
+            return
+        edited = ktts.apply_override(array.array("h", raw), override)
+
+        backup_path = path[:-4] + ".orig"
+        if not os.path.exists(backup_path):
+            try:
+                shutil.copy(path, backup_path)
+            except OSError as e:
+                messagebox.showerror("한국어 TTS", f"백업 실패: {e}")
+                return
+
+        try:
+            with open(path, "wb") as f:
+                f.write(ktts.to_wav_bytes(edited))
+        except OSError as e:
+            messagebox.showerror("한국어 TTS", f"저장 실패: {e}")
+            return
+
+        self.edit_status_label.config(text=f"'{name}.wav'에 적용해 저장했습니다 (원본은 {name}.orig 로 보관됨).")
+        self._refresh_edit_panel()
+        self._refresh_done_markers()
+
+    def _revert_edit(self):
+        if not hasattr(self, "voice_dir") or not self.names:
+            return
+        name = self._current_name()
+        path = os.path.join(self.voice_dir, name + ".wav")
+        backup_path = path[:-4] + ".orig"
+        if not os.path.exists(backup_path):
+            messagebox.showinfo("한국어 TTS", "복원할 원본 백업이 없습니다.")
+            return
+        try:
+            shutil.copy(backup_path, path)
+        except OSError as e:
+            messagebox.showerror("한국어 TTS", f"복원 실패: {e}")
+            return
+
+        self.edit_status_label.config(text=f"'{name}.wav'을 원본으로 복원했습니다.")
+        self._refresh_edit_panel()
 
     # ------------------------------------------------------
     # Recording
@@ -637,6 +979,16 @@ class App(tk.Tk):
         except OSError as e:
             messagebox.showerror("한국어 TTS", f"저장 실패: {e}")
             return
+        # A fresh recording replaces the take entirely - any .orig backup
+        # from the file-editing panel (see "다듬기") belonged to the OLD
+        # take and would otherwise let a later "되돌리기" wrongly restore it
+        # instead of this new one.
+        backup_path = path[:-4] + ".orig"
+        if os.path.exists(backup_path):
+            try:
+                os.remove(backup_path)
+            except OSError:
+                pass
         self._refresh_done_markers()
         if self.index + 1 < len(self.names):
             self.index += 1
