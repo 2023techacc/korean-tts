@@ -45,13 +45,14 @@ def decompose(ch: str) -> str:
 # Pronunciation tables
 # ------------------------------------------------------
 
-COMPOUND_VOWELS = {"ㅘ": "ㅗㅏ", "ㅙ": "ㅗㅐ", "ㅚ": "ㅗㅐ", "ㅝ": "ㅜㅓ", "ㅞ": "ㅜㅔ", "ㅟ": "ㅜㅣ", "ㅢ": "ㅡㅣ"}
-# ㅚ's REAL orthographic split is ㅗ+ㅣ (used only when PhonologyOptions.
-# distinguish_oe_wae is on - see _syllable_to_jamo) - the default "ㅗㅐ"
-# above matches how it's normally pronounced in casual speech (merged with
-# ㅙ), which is why the shipped pieces library never needed a separate ㅚ
-# recording at all.
-COMPOUND_VOWELS_OE_DISTINCT = "ㅗㅣ"
+COMPOUND_VOWELS = {"ㅘ": "ㅗㅏ", "ㅙ": "ㅗㅐ", "ㅚ": "ㅗㅐ", "ㅝ": "ㅜㅓ", "ㅞ": "ㅗㅐ", "ㅟ": "ㅜㅣ", "ㅢ": "ㅡㅣ"}
+# ㅚ/ㅙ/ㅞ are pronounced almost identically in casual modern Korean, so all
+# three default to ㅙ's split (ㅗ+ㅐ) - the shipped pieces library never
+# needed separate ㅚ/ㅞ recordings at all. Their REAL orthographic splits
+# (used only when PhonologyOptions.distinguish_oe_wae is on - see
+# _syllable_to_jamo) are ㅗ+ㅣ and ㅜ+ㅔ respectively; ㅙ's default split IS
+# already its real one, so it needs no special-casing either way.
+COMPOUND_VOWELS_OE_DISTINCT = {"ㅚ": "ㅗㅣ", "ㅞ": "ㅜㅔ"}
 VOWEL_MERGE = {"ㅔ": "ㅐ", "ㅖ": "ㅒ"}
 ROMAN = {
     "ㅏ": "a", "ㅓ": "eo", "ㅐ": "ae", "ㅔ": "e", "ㅡ": "eu", "ㅣ": "i", "ㅗ": "o", "ㅜ": "u",
@@ -171,9 +172,10 @@ class PhonologyOptions:
       syllable/diphone already treat these as distinct characters with no
       merge step at all (they look up whole composed syllables, never
       touching VOWEL_MERGE), so this only affects text_to_groups's split.
-    - distinguish_oe_wae: use ㅚ's real orthographic split (ㅗ+ㅣ) instead
-      of the default ㅗ+ㅐ that makes it sound identical to ㅙ. Pieces-only,
-      same reasoning as distinguish_ae_e.
+    - distinguish_oe_wae: ㅚ/ㅙ/ㅞ are pronounced almost identically in
+      casual modern Korean, so all three default to ㅙ's split (ㅗ+ㅐ) -
+      this restores ㅚ and ㅞ's own real orthographic splits (ㅗ+ㅣ and
+      ㅜ+ㅔ) instead. Pieces-only, same reasoning as distinguish_ae_e.
     """
 
     _DEFAULTS = {
@@ -427,12 +429,14 @@ def _syllable_to_jamo(cho, jung, jong, phonology=None):
     (only relevant if liaison above didn't already resolve/move it) and
     compound-vowel splitting.
 
-    `phonology.distinguish_oe_wae` (see PhonologyOptions) swaps ㅚ's default
-    split (ㅗㅐ, identical to ㅙ's) for its real orthographic one (ㅗㅣ).
-    `phonology.distinguish_ae_e` skips merging a resulting ㅔ/ㅖ into ㅐ/ㅒ.
-    Both pieces-only distinctions - full-syllable/diphone never call this
-    (they look up whole composed syllables directly, so ㅐ/ㅔ and ㅚ/ㅙ are
-    already naturally distinct for them)."""
+    `phonology.distinguish_oe_wae` (see PhonologyOptions) swaps ㅚ/ㅞ's
+    default split (both ㅗㅐ, identical to ㅙ's) for their real orthographic
+    ones (ㅗㅣ and ㅜㅔ respectively) - ㅙ's default split IS already its
+    real one, so it's unaffected either way. `phonology.distinguish_ae_e`
+    skips merging a resulting ㅔ/ㅖ into ㅐ/ㅒ. Both pieces-only distinctions
+    - full-syllable/diphone never call this (they look up whole composed
+    syllables directly, so ㅐ/ㅔ and ㅚ/ㅙ/ㅞ are already naturally distinct
+    for them)."""
     phonology = phonology if phonology is not None else PhonologyOptions()
     a = [cho, jung] + ([jong] if jong else [])
     if a[-1] in CONSONANTS:
@@ -440,8 +444,8 @@ def _syllable_to_jamo(cho, jung, jong, phonology=None):
 
     b = []
     for j in a:
-        if phonology.distinguish_oe_wae and j == "ㅚ":
-            b += list(COMPOUND_VOWELS_OE_DISTINCT)
+        if phonology.distinguish_oe_wae and j in COMPOUND_VOWELS_OE_DISTINCT:
+            b += list(COMPOUND_VOWELS_OE_DISTINCT[j])
         else:
             b += list(COMPOUND_VOWELS.get(j, j))
     c = []
@@ -473,46 +477,55 @@ def _syllable_to_jamo(cho, jung, jong, phonology=None):
 # recording) are left exactly as before.
 
 def text_to_groups(text: str, dedicated_diphthong_check=None, syllable_override_check=None,
-                    naming: str = "hex-codepoint", phonology=None):
+                    naming: str = "hex-codepoint", phonology=None, legacy_piece_check=None):
     """Like text_to_samples, but keeps each character's sample name(s)
     grouped as (kind, [names]) so audio building knows which adjacent
     samples are lobes of the same syllable. A PAUSE is its own ('single',
     [PAUSE]) group. text_to_samples is just this, flattened.
 
-    `dedicated_diphthong_check(name) -> bool` is an optional bank-supplied
-    lookup (see korean_tts.py's "Sound banks" section / synthesize()): for
-    a syllable whose vowel is a compound one (ㅘ/ㅝ/ㅢ/etc, normally split
-    into two crossfaded pieces below), if this returns True for the
-    dedicated fused recording's filename, that one recording is used
-    instead of the usual split - with no coverage requirement, since the
-    check runs per-syllable and falls through to the normal split whenever
-    it returns False. Every existing caller passes None here (the default),
-    which skips this entirely and leaves behavior identical to before.
+    `syllable_override_check(name) -> bool` is an optional bank-supplied
+    lookup (see korean_tts.py's "Sound banks" section / synthesize()),
+    checked first for EVERY real syllable against the COMPLETE
+    composed-and-neutralized character (coda included) - the exact
+    whole-syllable tier. If it returns True, that one recording is used
+    whole, with no coverage requirement (falls through to the next tier
+    per-syllable whenever it returns False). Defaults to None, matching
+    every existing caller's behavior exactly.
 
-    `syllable_override_check(name) -> bool` is a more general version of the
-    same idea: checked first, for EVERY real syllable (not just compound-
-    vowel ones), against the COMPLETE composed-and-neutralized character
-    (coda included). This closes gaps dedicated_diphthong_check can't: a
-    simple-vowel+obstruent-coda syllable (학) that's normally two pieces
-    hard-concatenated with no crossfade at all, and any sonorant-coda
-    syllable (반) that's normally crossfaded against a generic bare tail.
-    The two checks look up different filenames specifically for a compound-
-    vowel+sonorant-coda syllable (dedicated_diphthong_check's key omits the
-    coda; this one includes it), so a bank with both settings on gets a
-    real three-tier fallback: full override, then vowel-fusion+generic-
-    tail, then the full split. Defaults to None, matching every existing
-    caller's behavior exactly.
+    `dedicated_diphthong_check(name) -> bool` is the second tier, checked
+    against the onset+nucleus "CV block" (no coda, e.g. 가 or 화) for EVERY
+    syllable regardless of vowel - not just compound-vowel ones. If the CV
+    block is recorded:
+      - No coda needed: used alone.
+      - Coda needed: tries the CV block's matching coda-tail recording
+        (composed with a null onset, e.g. 안 - see all_diphone_coda_tails)
+        next, joined with a "diphone"-kind crossfade (both sides already
+        agree on the vowel, so a light join suffices). If that's absent:
+        a sonorant coda instead crossfades the CV block against the usual
+        shared bare-tail recording (n/l/m/ng); an obstruent coda crossfades
+        it against the ordinary vowel+coda piece (e.g. ag) the full split
+        would use for its own second half - both sides already agree on
+        the vowel there too, unlike splitting the glide itself (ho+ag),
+        which crossfades between two DIFFERENT vowel qualities.
+    Absent the CV block entirely, falls through to the full split below,
+    per-syllable. Defaults to None, matching every existing caller.
 
-    For an obstruent-coda compound-vowel syllable specifically (확, 곽, ...),
-    dedicated_diphthong_check gets a THIRD tier between "exact whole-syllable
-    recording" and "full split": if the coda-less glide (화) is recorded but
-    the specific coda variant (확) isn't, that glide is joined to the same
-    generic vowel+coda piece the full split would use for its second half
-    (ag) - both sides already agree on the glide's ending vowel quality at
-    that seam, unlike splitting the glide itself (ho+ag) which crossfades
-    between two DIFFERENT vowel qualities. One "화"-style recording this way
-    covers every coda variant, not just whichever ones got fully re-recorded
-    as their own complete syllable.
+    The two checks together give up to three fallback tiers for a single
+    syllable: exact whole-syllable override, then CV-block(+tail), then the
+    full split - each stage only used when the previous one's file isn't
+    present, so a bank can record as much or as little as it wants at any
+    tier and everything else degrades gracefully.
+
+    `legacy_piece_check(name) -> bool` guards the two "hex tail absent"
+    sub-branches above (bare sonorant tail, obstruent vowel+coda piece):
+    a bank whose ENTIRE library is hex-named CV-blocks/tails (no romanized
+    pieces backing it at all, e.g. a former "diphone"-type bank) has no
+    such legacy piece to fall back to, so without this check the code
+    would emit a group naming a file that doesn't exist. Defaults to None,
+    which treats every legacy piece as absent - the safe default. A
+    `pieces`-type bank (which always has the full romanized library)
+    should pass a real existence check here so dedicated_diphthongs keeps
+    working exactly as before.
     """
     groups = []
 
@@ -534,38 +547,31 @@ def text_to_groups(text: str, dedicated_diphthong_check=None, syllable_override_
                 groups.append(("single", [name]))
                 continue
 
-        if dedicated_diphthong_check is not None and slot[1] in COMPOUND_VOWELS:
+        if dedicated_diphthong_check is not None:
             cho, jung, jong = slot
             norm_jong = FINAL_MAP.get(jong, jong) if jong in CONSONANTS else jong
-            if norm_jong in SONORANTS:
-                # Sonorant coda: the dedicated recording only covers
-                # onset+vowel-glide (no coda) - the coda is still the usual
-                # shared bare-tail recording, appended as its own piece.
-                name = syllable_filename(_compose(cho, jung, ""), naming)
-                if dedicated_diphthong_check(name):
-                    groups.append(("coda", [name, ROMAN[norm_jong]]))
+            cv_name = syllable_filename(_compose(cho, jung, ""), naming)
+            if dedicated_diphthong_check(cv_name):
+                if not norm_jong:
+                    groups.append(("single", [cv_name]))
                     continue
-            else:
-                # No coda, or an obstruent coda that composes into one
-                # complete, real syllable - one dedicated recording covers
-                # the whole thing.
-                name = syllable_filename(_compose(cho, jung, norm_jong), naming)
-                if dedicated_diphthong_check(name):
-                    groups.append(("single", [name]))
+                tail_name = syllable_filename(_compose("ㅇ", jung, norm_jong), naming)
+                if dedicated_diphthong_check(tail_name):
+                    groups.append(("diphone", [cv_name, tail_name]))
                     continue
-                if norm_jong:
-                    # No exact recording of the whole syllable (e.g. 확), but
-                    # the coda-less glide (화) might be - reuse it plus the
-                    # ordinary vowel+coda piece (ag) a full split would use
-                    # for its second half, joined where both sides already
-                    # share the same vowel (see docstring above).
-                    glide_name = syllable_filename(_compose(cho, jung, ""), naming)
-                    if dedicated_diphthong_check(glide_name):
-                        v2 = COMPOUND_VOWELS[jung][1]
-                        v2 = VOWEL_MERGE.get(v2, v2)
-                        tail = ROMAN[v2] + ROMAN[norm_jong]
-                        groups.append(("coda", [glide_name, tail]))
-                        continue
+                if norm_jong in SONORANTS:
+                    legacy_name = ROMAN[norm_jong]
+                else:
+                    v2 = COMPOUND_VOWELS[jung][-1] if jung in COMPOUND_VOWELS else jung
+                    v2 = VOWEL_MERGE.get(v2, v2)
+                    legacy_name = ROMAN[v2] + ROMAN[norm_jong]
+                if legacy_piece_check is not None and legacy_piece_check(legacy_name):
+                    groups.append(("coda", [cv_name, legacy_name]))
+                    continue
+                # Neither the hex tail nor the legacy piece exists - the CV
+                # block alone can't complete this syllable, so fall through
+                # to the full split below (or, for a caller with a
+                # fallback_bank configured, to that fallback entirely).
 
         c = _syllable_to_jamo(*slot, phonology=phonology)
         if any(j not in ROMAN for j in c):
@@ -630,6 +636,35 @@ def all_reachable_samples(phonology=None):
             if name != PAUSE:
                 names.add(name)
     return names
+
+
+def _romanized_piece_names() -> frozenset:
+    """Every romanized piece name the `pieces` split algorithm could ever
+    produce (onset+vowel, bare vowel, vowel+stop-coda, bare sonorant tail) -
+    a fixed structural closure, not a simulation over all 11,172 syllables,
+    so it's cheap enough to compute once at import time. Used to keep the
+    hex-lookup tiers in text_to_groups() from ever misreading a
+    coincidentally hex-like romanized name (e.g. "bbae", ddae") as a
+    dedicated recording of some unrelated syllable - verified: chr(0xbbae)
+    is a real, reachable Hangul syllable completely unrelated to what
+    bbae.wav (ㅃ+ㅐ) actually contains, and sound/default/ already has that
+    exact file. `0xddae` also looks hex-like but falls outside the valid
+    Hangul range (0xAC00-0xD7A3), so it's harmless either way."""
+    simple_vowels = [v for v in JUNGSEONG if v in ROMAN]
+    names = set()
+    for cho in CHOSEONG:
+        for jung in simple_vowels:
+            names.add(ROMAN[cho] + ROMAN[jung])
+    stop_jong = [j for j in JONGSEONG if j in ("ㄱ", "ㄷ", "ㅂ")]
+    for jung in simple_vowels:
+        names.add(ROMAN[jung])
+        for jong in stop_jong:
+            names.add(ROMAN[jung] + ROMAN[jong])
+    names.update({"n", "l", "m", "ng"})
+    return frozenset(names)
+
+
+ROMANIZED_PIECE_NAMES = _romanized_piece_names()
 
 
 # ------------------------------------------------------
@@ -847,9 +882,9 @@ def overrides_path_for_voice(base_path: str, voice: str) -> str:
 #
 #   {
 #     "schema_version": 1,
-#     "type": "pieces",             # or "full-syllable"
+#     "type": "pieces",             # legacy/display only - see _migrate_legacy_type
 #     "display_name": "내레이터 2",  # optional, UI label
-#     "settings": {...},            # type-specific, see build_audio_full_syllable/synthesize
+#     "settings": {...},            # see PhonologyOptions/synthesize - not type-specific anymore
 #     "audio": {...}                # optional per-bank AudioSettings overrides, see below
 #   }
 #
@@ -864,12 +899,6 @@ BANK_TYPE_FULL_SYLLABLE = "full-syllable"
 BANK_TYPE_DIPHONE = "diphone"
 
 _DEFAULT_BANK_MANIFEST = {"schema_version": 1, "type": BANK_TYPE_PIECES, "settings": {}, "audio": {}}
-
-
-class UnsupportedBankTypeError(AudioError):
-    def __init__(self, bank_type):
-        super().__init__(f"알 수 없는 사운드 뱅크 종류: {bank_type}")
-        self.bank_type = bank_type
 
 
 def load_bank_manifest(bank_dir: str) -> dict:
@@ -1026,8 +1055,8 @@ def _apply_fade(samples: array.array, fade_len: int):
 # its length: generous for a diphthong (blending vowel qualities together IS
 # the correct glide sound), lighter for a sonorant coda (don't swallow the
 # consonant's identity, just trim the dead air of playing it as a whole
-# separate syllable). "diphone" (build_audio_diphone's CV-block+coda-tail
-# join) uses the same lighter overlap as "coda" by default - both join a
+# separate syllable). "diphone" (a CV-block+coda-tail join in text_to_groups)
+# uses the same lighter overlap as "coda" by default - both join a
 # complete vowel realization to a following consonant, not two half-vowels.
 # Clamped in samples so a very short or very long clip doesn't produce a
 # degenerate (near-zero or near-total) overlap.
@@ -1268,38 +1297,40 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
     return track, missing
 
 
-def build_audio_full_syllable(
-    text, sound_dir, fallback_dir=None, fallback_manifest=None,
-    gap_ms=300, fade_ms=5, normalize=True, speed=1.0, stop_gap_ms=None,
-    audio_settings=None, naming="hex-codepoint", phonology=None,
+def build_audio_with_fallback(
+    text, bank_dir, fallback_dir=None, fallback_manifest=None,
+    gap_ms=300, fade_ms=5, normalize=True, crossfade=True, speed=1.0, stop_gap_ms=None,
+    overrides=None, audio_settings=None, naming="hex-codepoint", phonology=None,
+    syllable_override_check=None, dedicated_diphthong_check=None, legacy_piece_check=None,
 ):
-    """Assemble `text` from one whole-syllable recording per character - the
-    "full-syllable" bank type's builder, an alternative to build_audio's
-    piece-assembly scheme (no crossfade/coda-shortening needed since each
-    recording is already a complete, continuous sound).
+    """Per-character assembly for a bank that has a `fallback_bank`
+    configured. Each composed-and-neutralized character is resolved
+    through the SAME tiered cascade text_to_groups()/build_audio() give
+    every other bank (exact whole-syllable override, then CV-block+
+    coda-tail, then the ordinary piece split) - falling back to
+    `fallback_dir`'s own build_audio, one hop, one WHOLE character at a
+    time (never a partial mix of this bank's pieces with the fallback's),
+    only when nothing in this bank covers that character at all.
 
-    Liaison/assimilation still has to run first (_parse_and_apply_rules,
-    the same step text_to_pronunciation uses) so the CORRECTED syllable is
-    looked up — e.g. 옷이 looks up 오 then 시, not 옷 then 이 — followed by
-    the same batchim neutralisation text_to_pronunciation applies (밖 -> 박)
-    so the filename matches what's actually pronounced.
+    Liaison/assimilation runs first (_parse_and_apply_rules, the same step
+    text_to_pronunciation uses) so the CORRECTED syllable is looked up -
+    e.g. 옷이 looks up 오 then 시, not 옷 then 이.
 
-    If a syllable isn't recorded in `sound_dir` and `fallback_dir` is given,
-    that one character is synthesized via the fallback bank's own
-    (piece-based) build_audio instead of being dropped. Returns
-    (samples, missing, fallback_used): `missing` lists characters found
-    nowhere (this bank or its fallback), `fallback_used` lists characters
-    served via the fallback rather than a dedicated recording of this bank's
-    own — a fully separate list from `missing`, not a subset of it.
+    Returns (samples, missing, fallback_used): `missing` lists characters
+    found nowhere (this bank or its fallback), `fallback_used` lists
+    characters served via the fallback - a fully separate list from
+    `missing`, not a subset of it.
     """
     settings = audio_settings if audio_settings is not None else AudioSettings()
     stop_gap_ms = settings.default_stop_gap_ms if stop_gap_ms is None else stop_gap_ms
     fallback_settings = resolve_audio_settings(fallback_manifest) if fallback_manifest else AudioSettings()
+    fallback_phonology = resolve_phonology_options(
+        (fallback_manifest or {}).get("settings") or {}
+    )
 
     track = array.array("h")
     gap = array.array("h", bytes(int(TARGET_RATE * gap_ms / 1000) * SAMPLE_WIDTH))
     stop_gap = array.array("h", bytes(int(TARGET_RATE * stop_gap_ms / 1000) * SAMPLE_WIDTH))
-    fade_len = int(TARGET_RATE * fade_ms / 1000)
     missing = []
     fallback_used = []
     prev_ends_in_stop = False
@@ -1317,130 +1348,40 @@ def build_audio_full_syllable(
         cho, jung, jong = slot
         norm_jong = FINAL_MAP.get(jong, jong) if jong in CONSONANTS else jong
         ch = _compose(cho, jung, norm_jong)
-        name = syllable_filename(ch, naming)
-        path = os.path.join(sound_dir, name + ".wav")
 
-        if os.path.exists(path):
-            samples = read_sample(path, normalize=normalize, audio_settings=settings)
-        elif fallback_dir is not None:
-            sub_groups = text_to_groups(ch)
-            sub_track, sub_missing = build_audio(
-                sub_groups, fallback_dir, gap_ms=0, fade_ms=fade_ms,
-                normalize=normalize, audio_settings=fallback_settings,
-            )
-            if sub_missing or not len(sub_track):
-                missing.append(ch)
-                samples = None
-            else:
-                samples = sub_track
-                fallback_used.append(ch)
-        else:
-            missing.append(ch)
+        sub_groups = text_to_groups(
+            ch, syllable_override_check=syllable_override_check,
+            dedicated_diphthong_check=dedicated_diphthong_check, naming=naming, phonology=phonology,
+            legacy_piece_check=legacy_piece_check,
+        )
+        sub_track, sub_missing = build_audio(
+            sub_groups, bank_dir, gap_ms=0, fade_ms=fade_ms, normalize=normalize,
+            crossfade=crossfade, overrides=overrides, audio_settings=settings,
+        )
+
+        if sub_missing or not len(sub_track):
             samples = None
-
-        if samples is not None and len(samples):
-            if prev_ends_in_stop and stop_gap_ms:
-                track.extend(stop_gap)
-            chunk = array.array("h", samples)
-            if fade_len:
-                _apply_fade(chunk, fade_len)
-            track.extend(chunk)
-            prev_ends_in_stop = norm_jong in {"ㄱ", "ㄷ", "ㅂ"}
-        else:
-            prev_ends_in_stop = False
-
-    if speed != 1.0:
-        track = change_speed(track, speed)
-    return track, missing, fallback_used
-
-
-def build_audio_diphone(
-    text, sound_dir, fallback_dir=None, fallback_manifest=None,
-    gap_ms=300, fade_ms=5, normalize=True, speed=1.0, stop_gap_ms=None,
-    audio_settings=None, naming="hex-codepoint", phonology=None,
-):
-    """Assemble `text` from dedicated onset+nucleus (CV block) and nucleus+
-    coda (coda tail) recordings - the "diphone" bank type's builder, a
-    bounded middle tier between build_audio's piece-assembly (some audible
-    approximation) and build_audio_full_syllable's one-recording-per-
-    syllable scheme (maximal naturalness, thousands of recordings). Every
-    reachable syllable needs at most two of ~510 recordings (see
-    all_diphone_cv_blocks/all_diphone_coda_tails), joined with a real
-    crossfade when there's a coda - unlike full-syllable's whole-file
-    lookups, both the CV block and the coda tail independently carry a
-    vowel realization at the seam, so hard-concatenating them would double
-    the vowel attack.
-
-    If either half a syllable needs is missing and `fallback_dir` is given,
-    the WHOLE syllable (not a partial mix of whichever half was found) is
-    synthesized via the fallback bank's own (piece-based) build_audio
-    instead - same one-hop, whole-syllable-or-nothing shape as
-    build_audio_full_syllable's fallback. Returns (samples, missing,
-    fallback_used), same contract as build_audio_full_syllable.
-    """
-    settings = audio_settings if audio_settings is not None else AudioSettings()
-    stop_gap_ms = settings.default_stop_gap_ms if stop_gap_ms is None else stop_gap_ms
-    fallback_settings = resolve_audio_settings(fallback_manifest) if fallback_manifest else AudioSettings()
-
-    track = array.array("h")
-    gap = array.array("h", bytes(int(TARGET_RATE * gap_ms / 1000) * SAMPLE_WIDTH))
-    stop_gap = array.array("h", bytes(int(TARGET_RATE * stop_gap_ms / 1000) * SAMPLE_WIDTH))
-    fade_len = int(TARGET_RATE * fade_ms / 1000)
-    missing = []
-    fallback_used = []
-    prev_ends_in_stop = False
-    pending_pause = False
-
-    for slot in _parse_and_apply_rules(text, phonology):
-        if not isinstance(slot, list):
-            if not pending_pause:
-                track.extend(gap)
-                prev_ends_in_stop = False
-                pending_pause = True
-            continue
-        pending_pause = False
-
-        cho, jung, jong = slot
-        norm_jong = FINAL_MAP.get(jong, jong) if jong in CONSONANTS else jong
-        ch = _compose(cho, jung, norm_jong)
-
-        cv_name = syllable_filename(_compose(cho, jung, ""), naming)
-        cv_path = os.path.join(sound_dir, cv_name + ".wav")
-        samples = None
-
-        if not norm_jong:
-            if os.path.exists(cv_path):
-                samples = read_sample(cv_path, normalize=normalize, audio_settings=settings)
-        else:
-            tail_name = syllable_filename(_compose("ㅇ", jung, norm_jong), naming)
-            tail_path = os.path.join(sound_dir, tail_name + ".wav")
-            if os.path.exists(cv_path) and os.path.exists(tail_path):
-                cv_chunk = array.array("h", read_sample(cv_path, normalize=normalize, audio_settings=settings))
-                tail_chunk = array.array("h", read_sample(tail_path, normalize=normalize, audio_settings=settings))
-                samples = _crossfade_join([cv_chunk, tail_chunk], "diphone", audio_settings=settings)
-
-        if samples is None and fallback_dir is not None:
-            sub_groups = text_to_groups(ch)
-            sub_track, sub_missing = build_audio(
-                sub_groups, fallback_dir, gap_ms=0, fade_ms=fade_ms,
-                normalize=normalize, audio_settings=fallback_settings,
-            )
-            if sub_missing or not len(sub_track):
+            if fallback_dir is not None:
+                fb_groups = text_to_groups(ch, naming=naming, phonology=fallback_phonology)
+                fb_track, fb_missing = build_audio(
+                    fb_groups, fallback_dir, gap_ms=0, fade_ms=fade_ms,
+                    normalize=normalize, audio_settings=fallback_settings,
+                )
+                if not fb_missing and len(fb_track):
+                    samples = fb_track
+                    fallback_used.append(ch)
+            if samples is None:
                 missing.append(ch)
-                samples = None
-            else:
-                samples = sub_track
-                fallback_used.append(ch)
-        elif samples is None:
-            missing.append(ch)
+        else:
+            samples = sub_track
 
         if samples is not None and len(samples):
             if prev_ends_in_stop and stop_gap_ms:
                 track.extend(stop_gap)
-            chunk = array.array("h", samples)
-            if fade_len:
-                _apply_fade(chunk, fade_len)
-            track.extend(chunk)
+            # `samples` already went through build_audio() above (primary
+            # or fallback), which already applies its own edge fade per
+            # group - re-fading here would fade the edges twice.
+            track.extend(samples)
             prev_ends_in_stop = norm_jong in {"ㄱ", "ㄷ", "ㅂ"}
         else:
             prev_ends_in_stop = False
@@ -1448,75 +1389,101 @@ def build_audio_diphone(
     if speed != 1.0:
         track = change_speed(track, speed)
     return track, missing, fallback_used
+
+
+def _exists_check(bank_dir):
+    """A dedicated_diphthong_check/syllable_override_check closure for
+    synthesize(): true only for a hex-codepoint name that (a) has a .wav
+    file in `bank_dir` and (b) isn't also a name the `pieces` split
+    algorithm could produce on its own (see ROMANIZED_PIECE_NAMES) - the
+    fix for a real collision found while designing this (a hex-codepoint
+    name can coincidentally equal an existing romanized piece name, e.g.
+    "bbae", which would otherwise be misread as a dedicated recording of
+    an unrelated syllable)."""
+    def check(name, _dir=bank_dir):
+        return name not in ROMANIZED_PIECE_NAMES and os.path.exists(os.path.join(_dir, name + ".wav"))
+    return check
+
+
+def _legacy_piece_check(bank_dir):
+    """The text_to_groups() `legacy_piece_check` closure for synthesize():
+    a plain existence check (no ROMANIZED_PIECE_NAMES exclusion - here we
+    WANT a match against a known romanized piece name like "ag"/"n", not
+    a hex codepoint, so there's no collision to guard against). A bank
+    with no romanized pieces at all (e.g. a former "diphone"-type bank)
+    correctly gets False for every name, which is what makes
+    text_to_groups() fall through instead of naming a nonexistent file."""
+    def check(name, _dir=bank_dir):
+        return os.path.exists(os.path.join(_dir, name + ".wav"))
+    return check
+
+
+def _migrate_legacy_type(manifest: dict) -> dict:
+    """The shipped `bank.json` schema (round 1/2 of this feature) used
+    `type: "full-syllable"|"diphone"` as the sole discriminator for which
+    assembly strategy to use. synthesize() no longer branches on `type` at
+    all (every bank goes through the same tiered cascade) - `type` is kept
+    in the schema purely for display (tts.py --check) and for this
+    migration read, so an already-recorded bank like one with
+    `type: "diphone"` keeps working with zero file changes: it implies
+    `dedicated_diphthongs` (tier 2), and `type: "full-syllable"` implies
+    `syllable_overrides` (tier 1), UNLESS the bank's settings already say
+    otherwise explicitly. A bank with no `bank.json` (type defaults to
+    "pieces") or an explicit `type: "pieces"` gets neither implied - byte-
+    identical to today, since both checks stay None in that case."""
+    settings = dict(manifest.get("settings") or {})
+    bank_type = manifest.get("type", BANK_TYPE_PIECES)
+    if bank_type == BANK_TYPE_FULL_SYLLABLE:
+        settings.setdefault("syllable_overrides", True)
+    elif bank_type == BANK_TYPE_DIPHONE:
+        settings.setdefault("dedicated_diphthongs", True)
+    return settings
 
 
 def synthesize(text, sound_root, voice, **kwargs):
-    """Bank-type-aware entry point: resolves `voice`'s bank.json and routes
-    to the matching assembly strategy. Prefer this over manually chaining
-    text_to_groups()+build_audio() so new bank types keep working without
-    every caller needing its own type dispatch. Returns (samples, missing),
-    same shape as build_audio - if the bank is "full-syllable", its
-    fallback_used list (see build_audio_full_syllable) isn't part of this
-    return value; call build_audio_full_syllable directly if you need it.
-
-    Raises UnsupportedBankTypeError for any type this function doesn't
-    recognize - deliberately not silently treated as "pieces", since a
-    bank of some future type likely doesn't have flat <name>.wav pieces to
-    fall back to at all.
+    """Single entry point for turning `text` into audio for `voice`: loads
+    `voice`'s bank.json, resolves its settings (see _migrate_legacy_type
+    for how the now-legacy `type` field still matters), and dispatches to
+    build_audio() directly (no `fallback_bank` configured - the exact same
+    code path every bank used to take when it was "pieces"-typed with no
+    special settings, so a bank with no bank.json at all, like
+    sound/default/, is byte-identical by construction) or
+    build_audio_with_fallback() (a `fallback_bank` is configured, for ANY
+    bank now, not just former full-syllable/diphone ones - an incomplete
+    bank can borrow whole syllables from another voice instead of
+    reporting them `missing`). Returns (samples, missing) - a fallback
+    bank's `fallback_used` list isn't part of this return value; call
+    build_audio_with_fallback directly if you need it.
     """
     bank_dir = voice_dir(sound_root, voice)
     manifest = load_bank_manifest(bank_dir)
-    bank_type = manifest.get("type", BANK_TYPE_PIECES)
-    settings_block = manifest.get("settings") or {}
+    settings_block = _migrate_legacy_type(manifest)
     audio_settings = resolve_audio_settings(manifest)
     kwargs.setdefault("stop_gap_ms", audio_settings.default_stop_gap_ms)
 
     phonology = resolve_phonology_options(settings_block)
+    naming = settings_block.get("naming", "hex-codepoint")
 
-    if bank_type == BANK_TYPE_PIECES:
-        naming = settings_block.get("naming", "hex-codepoint")
-        diphthong_check = None
-        if settings_block.get("dedicated_diphthongs"):
-            def diphthong_check(name, _dir=bank_dir):
-                return os.path.exists(os.path.join(_dir, name + ".wav"))
-        override_check = None
-        if settings_block.get("syllable_overrides"):
-            def override_check(name, _dir=bank_dir):
-                return os.path.exists(os.path.join(_dir, name + ".wav"))
-        groups = text_to_groups(text, dedicated_diphthong_check=diphthong_check,
+    dedicated_check = _exists_check(bank_dir) if settings_block.get("dedicated_diphthongs") else None
+    override_check = _exists_check(bank_dir) if settings_block.get("syllable_overrides") else None
+    legacy_check = _legacy_piece_check(bank_dir) if dedicated_check is not None else None
+
+    fallback_name = settings_block.get("fallback_bank")
+    if not fallback_name:
+        groups = text_to_groups(text, dedicated_diphthong_check=dedicated_check,
                                  syllable_override_check=override_check, naming=naming,
-                                 phonology=phonology)
+                                 phonology=phonology, legacy_piece_check=legacy_check)
         return build_audio(groups, bank_dir, audio_settings=audio_settings, **kwargs)
 
-    if bank_type == BANK_TYPE_FULL_SYLLABLE:
-        fallback_name = settings_block.get("fallback_bank")
-        fallback_dir = voice_dir(sound_root, fallback_name) if fallback_name else None
-        fallback_manifest = load_bank_manifest(fallback_dir) if fallback_dir else None
-        naming = settings_block.get("naming", "hex-codepoint")
-        kwargs.pop("crossfade", None)
-        kwargs.pop("overrides", None)
-        samples, missing, _fallback_used = build_audio_full_syllable(
-            text, bank_dir, fallback_dir=fallback_dir, fallback_manifest=fallback_manifest,
-            audio_settings=audio_settings, naming=naming,
-            phonology=phonology, **kwargs,
-        )
-        return samples, missing
-
-    if bank_type == BANK_TYPE_DIPHONE:
-        fallback_name = settings_block.get("fallback_bank")
-        fallback_dir = voice_dir(sound_root, fallback_name) if fallback_name else None
-        fallback_manifest = load_bank_manifest(fallback_dir) if fallback_dir else None
-        naming = settings_block.get("naming", "hex-codepoint")
-        kwargs.pop("crossfade", None)
-        kwargs.pop("overrides", None)
-        samples, missing, _fallback_used = build_audio_diphone(
-            text, bank_dir, fallback_dir=fallback_dir, fallback_manifest=fallback_manifest,
-            audio_settings=audio_settings, naming=naming,
-            phonology=phonology, **kwargs,
-        )
-        return samples, missing
-
-    raise UnsupportedBankTypeError(bank_type)
+    fallback_dir = voice_dir(sound_root, fallback_name)
+    fallback_manifest = load_bank_manifest(fallback_dir)
+    samples, missing, _fallback_used = build_audio_with_fallback(
+        text, bank_dir, fallback_dir=fallback_dir, fallback_manifest=fallback_manifest,
+        audio_settings=audio_settings, naming=naming, phonology=phonology,
+        syllable_override_check=override_check, dedicated_diphthong_check=dedicated_check,
+        legacy_piece_check=legacy_check, **kwargs,
+    )
+    return samples, missing
 
 
 def to_wav_bytes(samples: array.array) -> bytes:

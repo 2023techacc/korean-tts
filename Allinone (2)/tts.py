@@ -200,94 +200,64 @@ def interactive(args):
 
 def check(args):
     """Report which samples/syllables the engine can ask for but the voice
-    doesn't have - what to check differs by bank type (see korean_tts.py's
-    "Sound banks" section)."""
+    doesn't have. korean_tts.synthesize() tries up to three tiers per
+    syllable now (see its "Sound banks" section): the base romanized
+    pieces (always - every bank has this floor), CV-block+coda-tail hex
+    recordings (if `dedicated_diphthongs` is set), and exact whole-syllable
+    hex recordings (if `syllable_overrides` is set) - this reports
+    coverage for whichever of those actually apply to this bank."""
     sound_dir = ktts.voice_dir(args.sound_dir, args.voice)
     if not os.path.isdir(sound_dir):
         info(f"❌ 음성 폴더가 없습니다: {sound_dir}")
         return 1
 
     manifest = ktts.load_bank_manifest(sound_dir)
-    bank_type = manifest.get("type", ktts.BANK_TYPE_PIECES)
-    bank_settings = manifest.get("settings") or {}
+    bank_settings = ktts._migrate_legacy_type(manifest)
     have = ktts.list_bank_files(sound_dir)
+    phonology = ktts.resolve_phonology_options(bank_settings)
+    naming = bank_settings.get("naming", "hex-codepoint")
+    fallback_name = bank_settings.get("fallback_bank")
 
     info(f"목소리     : {args.voice}")
-    info(f"뱅크 종류  : {bank_type}")
     info(f"음성 폴더 : {sound_dir}")
     info(f"보유 파일 : {len(have)}개")
 
-    phonology = ktts.resolve_phonology_options(bank_settings)
+    needed_total = set()
 
-    if bank_type == ktts.BANK_TYPE_FULL_SYLLABLE:
-        naming = bank_settings.get("naming", "hex-codepoint")
-        needed_chars = ktts.all_reachable_full_syllables(phonology)
-        name_to_char = {ktts.syllable_filename(ch, naming): ch for ch in needed_chars}
-        covered = have & set(name_to_char)
-        missing_names = sorted(set(name_to_char) - have)
-        unused = sorted(have - set(name_to_char))
+    pieces_needed = ktts.all_reachable_samples(phonology)
+    pieces_missing = sorted(pieces_needed - have)
+    needed_total |= pieces_needed
+    info(f"\n[조각] 필요 {len(pieces_needed)}개 - 보유 {len(pieces_needed & have)}개")
+    if pieces_missing:
+        info(f"  없는 조각 {len(pieces_missing)}개:")
+        for i in range(0, len(pieces_missing), 12):
+            info("   " + " ".join(pieces_missing[i:i + 12]))
 
-        info(f"필요 음절 : {len(needed_chars)}개 (실제로 조회되는 음절만 - 한글 11,172자 중 발음 규칙으로 "
-             "미리 다른 음절로 합쳐지는 것은 제외)")
-        info(f"직접 녹음됨: {len(covered)}개")
+    if bank_settings.get("dedicated_diphthongs"):
+        cv_names = {ktts.syllable_filename(ch, naming) for ch in ktts.all_diphone_cv_blocks(phonology)}
+        tail_names = {ktts.syllable_filename(ch, naming) for ch in ktts.all_diphone_coda_tails()}
+        needed_total |= cv_names | tail_names
+        info(f"\n[온셋+중성 · 중성+받침] 온셋+중성 보유 {len(cv_names & have)}/{len(cv_names)}개, "
+             f"중성+받침 보유 {len(tail_names & have)}/{len(tail_names)}개")
 
-        fallback_name = bank_settings.get("fallback_bank")
-        if fallback_name:
-            info(f"나머지 {len(missing_names)}개는 '{fallback_name}' 목소리로 대체 재생됩니다.")
-        elif missing_names:
-            info(f"\n❌ 대체 목소리(fallback_bank)가 없어 재생 불가능한 음절 {len(missing_names)}개:")
-            sample = [name_to_char[n] for n in missing_names[:60]]
-            for i in range(0, len(sample), 12):
-                info("   " + " ".join(sample[i:i + 12]))
-        if unused:
-            info(f"\nℹ️  쓰이지 않는 파일 {len(unused)}개 (녹음은 되어 있지만 지금 조회되지 않음): "
-                 + " ".join(unused[:30]) + (" ..." if len(unused) > 30 else ""))
+    if bank_settings.get("syllable_overrides"):
+        exact_names = {ktts.syllable_filename(ch, naming) for ch in ktts.all_reachable_full_syllables(phonology)}
+        needed_total |= exact_names
+        info(f"\n[완전한 음절] 필요 {len(exact_names)}개 - 보유 {len(exact_names & have)}개")
+
+    unused = sorted(have - needed_total)
+    if unused:
+        info(f"\nℹ️  쓰이지 않는 파일 {len(unused)}개: " + " ".join(unused[:30])
+             + (" ..." if len(unused) > 30 else ""))
+
+    if fallback_name:
+        info(f"\n위에서 없는 것은 '{fallback_name}' 목소리로 대체 재생됩니다.")
         return 0
-
-    if bank_type == ktts.BANK_TYPE_DIPHONE:
-        naming = bank_settings.get("naming", "hex-codepoint")
-        cv_chars = ktts.all_diphone_cv_blocks(phonology)
-        tail_chars = ktts.all_diphone_coda_tails()
-        cv_names = {ktts.syllable_filename(ch, naming) for ch in cv_chars}
-        tail_names = {ktts.syllable_filename(ch, naming) for ch in tail_chars}
-
-        info(f"필요 조각 (온셋+중성) : {len(cv_names)}개 - 보유 {len(have & cv_names)}개")
-        info(f"필요 조각 (중성+받침) : {len(tail_names)}개 - 보유 {len(have & tail_names)}개")
-
-        fallback_name = bank_settings.get("fallback_bank")
-        missing_cv = sorted(cv_names - have)
-        missing_tail = sorted(tail_names - have)
-        if fallback_name:
-            info(f"둘 중 하나라도 없는 음절은 '{fallback_name}' 목소리로 통째로 대체 재생됩니다.")
-        else:
-            if missing_cv:
-                info(f"\n❌ 대체 목소리 없이 온셋+중성 {len(missing_cv)}개가 없습니다: " + " ".join(missing_cv[:30])
-                     + (" ..." if len(missing_cv) > 30 else ""))
-            if missing_tail:
-                info(f"\n❌ 대체 목소리 없이 중성+받침 {len(missing_tail)}개가 없습니다: " + " ".join(missing_tail[:30])
-                     + (" ..." if len(missing_tail) > 30 else ""))
-        unused = sorted(have - cv_names - tail_names)
-        if unused:
-            info(f"\nℹ️  쓰이지 않는 파일 {len(unused)}개: " + " ".join(unused[:30])
-                 + (" ..." if len(unused) > 30 else ""))
-        return 0
-
-    needed = ktts.all_reachable_samples(phonology)
-    info(f"필요 음절 : {len(needed)}개 (한글 11,172자를 모두 읽는 데 필요한 조각)")
-
-    missing = sorted(needed - have)
-    extra = sorted(have - needed)
-
-    if missing:
-        info(f"\n❌ 없는 파일 {len(missing)}개:")
-        for i in range(0, len(missing), 12):
-            info("   " + " ".join(missing[i:i + 12]))
-    else:
-        info("\n✅ 모든 한글을 읽을 수 있습니다.")
-
-    if extra:
-        info(f"\nℹ️  쓰이지 않는 파일 {len(extra)}개: {' '.join(extra)}")
-    return 1 if missing else 0
+    if pieces_missing:
+        info(f"\n❌ 대체 목소리 없이 기본 조각 {len(pieces_missing)}개가 없어, 그 조각이 필요한 글자는 읽을 수 없습니다.")
+        return 1
+    info("\n✅ 기본 조각을 모두 갖추고 있어 한글 전체를 읽을 수 있습니다.")
+    return 0
 
 
 def main(argv=None):

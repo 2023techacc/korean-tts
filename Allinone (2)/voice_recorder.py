@@ -1,8 +1,10 @@
 """Voice recording tool for creating a new TTS voice.
 
-Walks through every sample name the phonology engine can actually select
-(korean_tts.all_reachable_samples()), shows a real Korean character to say
-for each one, records it via mic_record.MicRecorder, and saves accepted
+Walks through the item set a bank's checked settings call for (see
+SETTING_OPTIONS/build_walkthrough - the base romanized pieces are always
+included, plus hex-named CV-blocks/coda-tails and/or exact whole-syllable
+recordings depending on what's checked), shows a real Korean character to
+say for each one, records it via mic_record.MicRecorder, and saves accepted
 takes directly as sound/<voice>/<name>.wav - which the existing multi-voice
 system (korean_tts.list_voices/voice_dir, already used by tts.py/gui.py/
 Android/web) picks up immediately. No separate "build a voice" step: once
@@ -99,115 +101,134 @@ def _pieces_prompts(settings: dict) -> dict:
     return build_prompt_map()
 
 
-def _full_syllable_names(settings: dict) -> list:
-    """Ordered hex-codepoint (or raw-Hangul, per settings) filenames for
-    every REACHABLE composed Hangul syllable (korean_tts.
-    all_reachable_full_syllables()) - not the raw 11,172, since syllables
-    like 쟈 always resolve to 자's filename before a lookup ever happens
-    (see korean_tts.py's _apply_local_vowel_rules) and recording them would
-    be pure wasted effort. Composed-Hangul codepoints are already a
-    mixed-radix encoding of (cho, jung, jong) - HANGUL_START + (cho*21 +
-    jung)*28 + jong - so plain ascending codepoint order (what sorted()
-    naturally gives here) already groups by onset+vowel first, no separate
-    sort/grouping step needed for a speaker to stay in a similar mouth
-    position through a batch."""
-    naming = settings.get("naming", "hex-codepoint")
-    chars = sorted(ktts.all_reachable_full_syllables(ktts.resolve_phonology_options(settings)))
-    return [ktts.syllable_filename(ch, naming) for ch in chars]
+def _hex_filter(chars: set, naming: str) -> dict:
+    """char -> filename for every char in `chars`, EXCLUDING any whose
+    filename coincidentally matches a romanized piece name (see korean_tts.
+    ROMANIZED_PIECE_NAMES) - the engine's synthesize() permanently treats
+    such a name as the romanized piece, never as a dedicated recording of
+    that character (see korean_tts._exists_check's collision fix), so
+    asking someone to record it for that purpose here would silently never
+    be used that way. In practice this excludes exactly one syllable
+    (뮳, whose hex codepoint happens to equal the existing "bbae" piece)."""
+    return {
+        ch: ktts.syllable_filename(ch, naming) for ch in chars
+        if ktts.syllable_filename(ch, naming) not in ktts.ROMANIZED_PIECE_NAMES
+    }
 
 
-def _full_syllable_prompts(settings: dict) -> dict:
-    naming = settings.get("naming", "hex-codepoint")
-    chars = ktts.all_reachable_full_syllables(ktts.resolve_phonology_options(settings))
-    return {ktts.syllable_filename(ch, naming): ch for ch in chars}
-
-
-def _diphone_names(settings: dict) -> list:
-    """Merged, ordered name list for the "diphone" bank type: every CV
-    block (onset+nucleus) then every coda tail (nucleus+coda), each in
-    ascending-codepoint order - see korean_tts.all_diphone_cv_blocks/
-    all_diphone_coda_tails. One flat list needs no new UI: App already
-    treats names/prompts generically regardless of what they represent."""
+def _cv_and_tail_names(settings: dict) -> list:
+    """Tier-2 hex names (see korean_tts.py's text_to_groups cascade): every
+    CV block (onset+nucleus) then every coda tail (nucleus+coda), each in
+    ascending-codepoint order, so a speaker stays in a similar mouth
+    position through a batch (composed-Hangul codepoints already encode
+    (cho,jung,jong) in mixed-radix order)."""
     naming = settings.get("naming", "hex-codepoint")
     phonology = ktts.resolve_phonology_options(settings)
-    chars = sorted(ktts.all_diphone_cv_blocks(phonology)) + sorted(ktts.all_diphone_coda_tails())
-    return [ktts.syllable_filename(ch, naming) for ch in chars]
+    cv_names = sorted(_hex_filter(ktts.all_diphone_cv_blocks(phonology), naming).values())
+    tail_names = sorted(_hex_filter(ktts.all_diphone_coda_tails(), naming).values())
+    return cv_names + tail_names
 
 
-def _diphone_prompts(settings: dict) -> dict:
+def _cv_and_tail_prompts(settings: dict) -> dict:
     naming = settings.get("naming", "hex-codepoint")
     phonology = ktts.resolve_phonology_options(settings)
-    chars = ktts.all_diphone_cv_blocks(phonology) | ktts.all_diphone_coda_tails()
-    return {ktts.syllable_filename(ch, naming): ch for ch in chars}
+    by_char = _hex_filter(ktts.all_diphone_cv_blocks(phonology), naming)
+    by_char.update(_hex_filter(ktts.all_diphone_coda_tails(), naming))
+    return {name: ch for ch, name in by_char.items()}
 
 
-def required_count(bank_type: str, settings: dict) -> int:
-    """How many recordings a bank of `bank_type` needs under `settings` -
-    the number shown live next to each setting in the new-bank creation
-    panel (see App._refresh_settings_panel). Shared with the (names,
-    prompts) sources below so the displayed count and the actual
-    walkthrough size can never drift apart."""
-    phonology = ktts.resolve_phonology_options(settings)
-    if bank_type == ktts.BANK_TYPE_PIECES:
-        return len(ktts.all_reachable_samples(phonology))
-    if bank_type == ktts.BANK_TYPE_FULL_SYLLABLE:
-        return len(ktts.all_reachable_full_syllables(phonology))
-    if bank_type == ktts.BANK_TYPE_DIPHONE:
-        return len(ktts.all_diphone_cv_blocks(phonology)) + len(ktts.all_diphone_coda_tails())
-    return 0
+def _exact_syllable_names(settings: dict) -> list:
+    """Tier-1 hex names: every REACHABLE composed Hangul syllable (korean_
+    tts.all_reachable_full_syllables()) - not the raw 11,172, since
+    syllables like 쟈 always resolve to 자's filename before a lookup ever
+    happens (see korean_tts.py's _apply_local_vowel_rules) and recording
+    them would be pure wasted effort."""
+    naming = settings.get("naming", "hex-codepoint")
+    by_char = _hex_filter(ktts.all_reachable_full_syllables(ktts.resolve_phonology_options(settings)), naming)
+    return sorted(by_char.values())
 
 
-# Per-bank-type (names, prompts) sources - see korean_tts.py's "Sound banks"
-# section. App only ever needs these two things per type (confirmed while
-# designing this: every other part of App - mic capture, progress/resume,
-# record/preview/accept/save mechanics, the whole UI shell - already works
-# on any (names, prompts) pair with no further changes).
-BANK_TYPES = [
-    {
-        "type": ktts.BANK_TYPE_PIECES,
-        "label": "조각 방식 (기본)",
-        "names": _pieces_names,
-        "prompts": _pieces_prompts,
-    },
-    {
-        "type": ktts.BANK_TYPE_FULL_SYLLABLE,
-        "label": "완전한 음절 통째로",
-        "names": _full_syllable_names,
-        "prompts": _full_syllable_prompts,
-    },
-    {
-        "type": ktts.BANK_TYPE_DIPHONE,
-        "label": "온셋+중성 · 중성+받침 조각 (디폰)",
-        "names": _diphone_names,
-        "prompts": _diphone_prompts,
-    },
-]
-BANK_TYPE_BY_ID = {t["type"]: t for t in BANK_TYPES}
+def _exact_syllable_prompts(settings: dict) -> dict:
+    naming = settings.get("naming", "hex-codepoint")
+    by_char = _hex_filter(ktts.all_reachable_full_syllables(ktts.resolve_phonology_options(settings)), naming)
+    return {name: ch for ch, name in by_char.items()}
 
-# Every optional setting selectable when creating a bank, as one flat list -
-# NOT a separate per-type registry, and the bank *type* above is presented
-# alongside these as just three more (mutually-exclusive) entries in the
-# same panel, not a separate dropdown-then-checkboxes two-step. "types" says
-# which bank types the setting applies to (it's hidden for the others);
-# "counts" says whether it changes required_count()'s result (dedicated_
-# diphthongs/syllable_overrides are open-ended optional extra recordings
-# with no fixed target count, so they show a fixed note instead of a live
-# number). Deliberately just plain dicts so a future distinction is one
-# entry away - see korean_tts.PhonologyOptions's own docstring for how to
-# add one at the engine level first.
-_ALL_TYPES = {ktts.BANK_TYPE_PIECES, ktts.BANK_TYPE_FULL_SYLLABLE, ktts.BANK_TYPE_DIPHONE}
+
+def required_count(settings: dict) -> int:
+    """How many recordings a bank needs under `settings`. The base pieces
+    count is always the floor (matches the "조각 방식" preset); checking
+    "온셋+중성 · 중성+받침 조각 별도 녹음" (tier 2, the "디폰" preset) or
+    "특정 음절 통째로 녹음" (tier 1, the "완전한 음절" preset) each add
+    their own item set on top, de-duplicated by filename - romanized piece
+    names and hex names never coincide (see ROMANIZED_PIECE_NAMES/
+    _hex_filter), so this is just an additive union in practice."""
+    names = set(_pieces_names(settings))
+    if settings.get("dedicated_diphthongs"):
+        names |= set(_cv_and_tail_names(settings))
+    if settings.get("syllable_overrides"):
+        names |= set(_exact_syllable_names(settings))
+    return len(names)
+
+
+def build_walkthrough(settings: dict) -> tuple:
+    """(names, prompts) for the recorder's walkthrough: the union of
+    whichever item sets are enabled, base pieces always first, then tier-2
+    CV-blocks+coda-tails, then tier-1 exact syllables, de-duped by name (a
+    name already seen keeps its first prompt - only relevant for the rare,
+    intentional shared-recording case in all_diphone_coda_tails, where
+    both prompts name the same character anyway). Every other part of App
+    (mic capture, progress/resume, record/preview/accept/save mechanics,
+    the whole UI shell) only ever needs this (names, prompts) pair, however
+    many item sets went into it."""
+    names = []
+    prompts = {}
+    seen = set()
+
+    def add_all(name_list, prompt_map):
+        for name in name_list:
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+                prompts[name] = prompt_map.get(name, "?")
+
+    add_all(_pieces_names(settings), _pieces_prompts(settings))
+    if settings.get("dedicated_diphthongs"):
+        add_all(_cv_and_tail_names(settings), _cv_and_tail_prompts(settings))
+    if settings.get("syllable_overrides"):
+        add_all(_exact_syllable_names(settings), _exact_syllable_prompts(settings))
+    return names, prompts
+
+
+# Every optional setting selectable when creating/reopening a bank, as one
+# flat list - nothing here is type-restricted anymore, since "type" isn't
+# an engine concept (see korean_tts.synthesize/_migrate_legacy_type): every
+# bank goes through the same cascade, and how much a bank has recorded at
+# each tier is what determines how close to full-syllable-quality it gets.
+# "조각 방식"/"디폰"/"완전한 음절" become PRESET BUTTONS (see App._apply_
+# preset) that just set a good starting combination of these checkboxes -
+# not baselines you're locked into. "counts" says whether checking a
+# setting changes required_count()'s result - true for all six now (even
+# dedicated_diphthongs/syllable_overrides have a well-defined item count
+# in this unified model). Deliberately just plain dicts so a future
+# distinction is one entry away - see korean_tts.PhonologyOptions's own
+# docstring for how to add one at the engine level first.
 SETTING_OPTIONS = [
-    {"key": "preserve_consonant_ui", "label": "자음+ㅢ 구분 (예: 씌)", "types": _ALL_TYPES, "counts": True},
-    {"key": "distinguish_palatal_glide", "label": "구개음화 뒤 반모음 구분 (자/쟈, 저/져 등)",
-     "types": _ALL_TYPES, "counts": True},
-    {"key": "distinguish_ae_e", "label": "ㅐ/ㅔ 구분", "types": {ktts.BANK_TYPE_PIECES}, "counts": True},
-    {"key": "distinguish_oe_wae", "label": "ㅚ/ㅙ 구분", "types": {ktts.BANK_TYPE_PIECES}, "counts": True},
-    {"key": "dedicated_diphthongs", "label": "이중모음 별도 녹음 (개수 제한 없음, 선택 녹음)",
-     "types": {ktts.BANK_TYPE_PIECES}, "counts": False},
-    {"key": "syllable_overrides", "label": "특정 음절 통째로 대체 녹음 허용 (개수 제한 없음)",
-     "types": {ktts.BANK_TYPE_PIECES}, "counts": False},
+    {"key": "preserve_consonant_ui", "label": "자음+ㅢ 구분 (예: 씌)", "counts": True},
+    {"key": "distinguish_palatal_glide", "label": "구개음화 뒤 반모음 구분 (자/쟈, 저/져 등)", "counts": True},
+    {"key": "distinguish_ae_e", "label": "ㅐ/ㅔ 구분", "counts": True},
+    {"key": "distinguish_oe_wae", "label": "ㅚ/ㅙ/ㅞ 구분", "counts": True},
+    {"key": "dedicated_diphthongs", "label": "온셋+중성 · 중성+받침 조각 별도 녹음", "counts": True},
+    {"key": "syllable_overrides", "label": "특정 음절 통째로 녹음", "counts": True},
 ]
-SETTING_OPTIONS_BY_KEY = {opt["key"]: opt for opt in SETTING_OPTIONS}
+# One-shot preset buttons (see App._apply_preset): each just sets these two
+# tier checkboxes to a good starting combination, matching the old type's
+# rough shape, then the user can freely adjust any box afterward. Phonology
+# checkboxes are left untouched by a preset click.
+PRESETS = [
+    {"label": "조각 방식", "settings": {"dedicated_diphthongs": False, "syllable_overrides": False}},
+    {"label": "디폰", "settings": {"dedicated_diphthongs": True, "syllable_overrides": False}},
+    {"label": "완전한 음절", "settings": {"dedicated_diphthongs": False, "syllable_overrides": True}},
+]
 
 
 def _peak_level(pcm: bytes) -> int:
@@ -343,11 +364,9 @@ class App(tk.Tk):
         self.names = []
         self.index = 0
         self.voice = tk.StringVar(value="")
-        # Bank type is presented as three mutually-exclusive checkboxes in
-        # the SAME panel as every other setting (see SETTING_OPTIONS), not a
-        # separate combobox-then-checkboxes two-step - "type" IS just a
-        # preset bundle of settings, from the UI's point of view.
-        self.type_vars = {t["type"]: tk.BooleanVar(value=(t is BANK_TYPES[0])) for t in BANK_TYPES}
+        # No "type" state at all - see SETTING_OPTIONS/PRESETS. Every
+        # checkbox here is independent; a preset button just sets a good
+        # starting combination of them (see _apply_preset).
         self.setting_vars = {opt["key"]: tk.BooleanVar(value=False) for opt in SETTING_OPTIONS}
         self.fallback_var = tk.StringVar(value="")
         self._pending_new_name = None
@@ -386,63 +405,78 @@ class App(tk.Tk):
 
         # New-bank settings panel: hidden (not packed) until _load_voice()
         # finds the typed name doesn't exist yet - shown once per new bank,
-        # never again once it's created (every setting here is immutable
-        # after creation, since changing type/phonology settings would
-        # orphan already-recorded files under the old naming/reachability
-        # scheme). The bank "type" is deliberately just three more
-        # (mutually-exclusive) checkboxes in this same list, not a separate
-        # dropdown picked before seeing the rest of the settings - see
-        # SETTING_OPTIONS and required_count() in the module-level registry.
+        # never again once it's created (every setting here shapes the
+        # walkthrough's item set/reachability, so changing it later would
+        # orphan already-recorded files' naming/counting assumptions).
+        # "조각 방식"/"디폰"/"완전한 음절" are PRESET BUTTONS (see PRESETS),
+        # not a separate exclusive choice - clicking one just sets a good
+        # starting combination of the checkboxes below, which the user can
+        # then freely adjust.
         self.new_bank_frame = ttk.LabelFrame(self, text="새 목소리 만들기")
 
-        self.type_count_labels = {}
-        for i, t in enumerate(BANK_TYPES):
-            ttk.Checkbutton(
-                self.new_bank_frame, text=t["label"], variable=self.type_vars[t["type"]],
-                command=lambda bt=t["type"]: self._on_type_toggled(bt),
-            ).grid(row=i, column=0, padx=8, pady=2, sticky="w")
-            count_label = ttk.Label(self.new_bank_frame, text="", foreground="#0a6")
-            count_label.grid(row=i, column=1, padx=4, pady=2, sticky="w")
-            self.type_count_labels[t["type"]] = count_label
-        row = len(BANK_TYPES)
+        preset_row = ttk.Frame(self.new_bank_frame)
+        preset_row.pack(fill="x", padx=8, pady=(8, 4))
+        ttk.Label(preset_row, text="프리셋:").pack(side="left")
+        for preset in PRESETS:
+            ttk.Button(preset_row, text=preset["label"],
+                       command=lambda p=preset: self._apply_preset(p)).pack(side="left", padx=4)
 
-        self.fallback_label = ttk.Label(self.new_bank_frame, text="빠진 음절 대체 목소리:")
-        self.fallback_label.grid(row=row, column=0, padx=8, pady=6, sticky="w")
-        self.fallback_combo = ttk.Combobox(self.new_bank_frame, textvariable=self.fallback_var, state="disabled", width=20)
-        self.fallback_combo.grid(row=row, column=1, padx=8, pady=6, sticky="w")
-        row += 1
+        fallback_row = ttk.Frame(self.new_bank_frame)
+        fallback_row.pack(fill="x", padx=8, pady=4)
+        ttk.Label(fallback_row, text="빠진 음절 대체 목소리 (선택 사항):").pack(side="left")
+        self.fallback_combo = ttk.Combobox(fallback_row, textvariable=self.fallback_var, state="readonly", width=20)
+        self.fallback_combo.pack(side="left", padx=6)
 
-        ttk.Separator(self.new_bank_frame, orient="horizontal").grid(
-            row=row, column=0, columnspan=3, sticky="ew", padx=8, pady=6
+        ttk.Separator(self.new_bank_frame, orient="horizontal").pack(fill="x", padx=8, pady=6)
+
+        # Scrollable so every checkbox stays reachable/readable regardless
+        # of window height or how many settings exist - a fixed-height
+        # canvas that no longer clips content the way a plain grid/pack
+        # layout did.
+        scroll_area = ttk.Frame(self.new_bank_frame)
+        scroll_area.pack(fill="both", expand=True, padx=8, pady=4)
+        settings_canvas = tk.Canvas(scroll_area, height=170, highlightthickness=0)
+        settings_scrollbar = ttk.Scrollbar(scroll_area, orient="vertical", command=settings_canvas.yview)
+        settings_canvas.configure(yscrollcommand=settings_scrollbar.set)
+        settings_canvas.pack(side="left", fill="both", expand=True)
+        settings_scrollbar.pack(side="left", fill="y")
+        settings_inner = ttk.Frame(settings_canvas)
+        settings_canvas.create_window((0, 0), window=settings_inner, anchor="nw")
+        settings_inner.bind(
+            "<Configure>", lambda _e: settings_canvas.configure(scrollregion=settings_canvas.bbox("all"))
         )
-        row += 1
+
+        def _on_mousewheel(event, _canvas=settings_canvas):
+            _canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        settings_canvas.bind("<Enter>", lambda _e: settings_canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        settings_canvas.bind("<Leave>", lambda _e: settings_canvas.unbind_all("<MouseWheel>"))
 
         self.setting_count_labels = {}
-        self.setting_rows = {}
         for opt in SETTING_OPTIONS:
-            row_frame = ttk.Frame(self.new_bank_frame)
-            row_frame.grid(row=row, column=0, columnspan=3, sticky="w", padx=8, pady=1)
+            row_frame = ttk.Frame(settings_inner)
+            row_frame.pack(fill="x", pady=1, anchor="w")
             ttk.Checkbutton(row_frame, text=opt["label"], variable=self.setting_vars[opt["key"]],
                              command=self._refresh_settings_panel).pack(side="left")
             count_label = ttk.Label(row_frame, text="", foreground="#888")
             count_label.pack(side="left", padx=6)
             self.setting_count_labels[opt["key"]] = count_label
-            self.setting_rows[opt["key"]] = row_frame
-            row += 1
 
-        ttk.Button(self.new_bank_frame, text="만들기", command=self._create_new_bank).grid(
-            row=row, column=0, columnspan=3, pady=(8, 4)
-        )
+        self.total_count_label = ttk.Label(self.new_bank_frame, text="", font=("", 10, "bold"))
+        self.total_count_label.pack(anchor="w", padx=8, pady=(4, 4))
+
+        ttk.Button(self.new_bank_frame, text="만들기", command=self._create_new_bank).pack(pady=(4, 8))
         # Not packed here - _prepare_new_bank_ui() packs it, _load_voice()/
         # _create_new_bank() pack_forget() it once a bank is open.
 
-        # Patch-a-syllable panel for an already-open "pieces" bank (see
-        # korean_tts.py's syllable_overrides setting): an open-ended "fix the
-        # syllable that sounds wrong" workflow, not a fixed walkthrough list,
-        # so it's deliberately NOT a BANK_TYPES registry entry - just an
-        # additive panel shown/hidden by _open_bank(). Reuses the SAME
-        # record/preview controls above (they don't reference a name at all,
-        # only self.current_take) - only the save destination differs.
+        # Patch-a-syllable panel for an already-open bank (see korean_tts.
+        # py's syllable_overrides setting): an open-ended "fix the syllable
+        # that sounds wrong" workflow, not a fixed walkthrough list, so it's
+        # deliberately not part of SETTING_OPTIONS's walkthrough - just an
+        # additive panel shown for every open bank now (syllable_overrides
+        # is universal). Reuses the SAME record/preview controls above
+        # (they don't reference a name at all, only self.current_take) -
+        # only the save destination differs.
         self.override_frame = ttk.LabelFrame(self, text="특정 음절 다시 녹음 (전체 대체)")
         ttk.Label(self.override_frame, text="음절:").grid(row=0, column=0, padx=8, pady=6, sticky="w")
         override_entry = ttk.Entry(self.override_frame, textvariable=self.override_char_var, width=4, font=("", 16))
@@ -554,128 +588,88 @@ class App(tk.Tk):
             self._prepare_new_bank_ui(name)
 
     def _prepare_new_bank_ui(self, name):
-        """A brand-new voice name: show the settings panel (type included -
-        see SETTING_OPTIONS) instead of creating the folder right away."""
+        """A brand-new voice name: show the settings panel instead of
+        creating the folder right away. fallback_bank is now optional for
+        every combination (the base pieces are always part of the
+        walkthrough too, so a bank never STRICTLY needs an external
+        fallback - it's just a convenience for syllables you choose not
+        to record yourself), so every existing bank is offered as a
+        candidate, not just pieces-type ones - as long as it doesn't
+        itself have a fallback_bank set (keeps the one-hop invariant)."""
         self._pending_new_name = name
         fallback_choices = [
             b["name"] for b in ktts.list_banks(SOUND_ROOT)
-            if b["manifest"].get("type", ktts.BANK_TYPE_PIECES) == ktts.BANK_TYPE_PIECES
+            if not (b["manifest"].get("settings") or {}).get("fallback_bank")
         ]
-        self.fallback_combo["values"] = fallback_choices
-        if ktts.DEFAULT_VOICE in fallback_choices:
-            self.fallback_var.set(ktts.DEFAULT_VOICE)
-        elif fallback_choices:
-            self.fallback_var.set(fallback_choices[0])
-        else:
-            self.fallback_var.set("")
+        self.fallback_combo["values"] = [""] + fallback_choices
+        self.fallback_var.set("")
 
-        for bt, var in self.type_vars.items():
-            var.set(bt == BANK_TYPES[0]["type"])
         for var in self.setting_vars.values():
             var.set(False)
         self._refresh_settings_panel()
         self.new_bank_frame.pack(fill="x", padx=10, pady=(0, 8))
 
-    def _selected_bank_type(self) -> str:
-        for bt, var in self.type_vars.items():
-            if var.get():
-                return bt
-        return ktts.BANK_TYPE_PIECES
-
     def _current_settings_dict(self) -> dict:
         return {key: True for key, var in self.setting_vars.items() if var.get()}
 
-    def _on_type_toggled(self, bank_type):
-        if self.type_vars[bank_type].get():
-            for bt, var in self.type_vars.items():
-                if bt != bank_type:
-                    var.set(False)
-        else:
-            # Exactly one type must always be selected - snap it back on
-            # rather than leaving none checked (radio-button semantics).
-            self.type_vars[bank_type].set(True)
+    def _apply_preset(self, preset):
+        for key, value in preset["settings"].items():
+            self.setting_vars[key].set(value)
         self._refresh_settings_panel()
 
     def _refresh_settings_panel(self):
         """Recomputes every live count in the new-bank panel (see
-        required_count()) and shows/hides rows that don't apply to the
-        currently selected type - called on every type/setting checkbox
-        toggle so the numbers never lag behind what's actually checked."""
-        bank_type = self._selected_bank_type()
+        required_count()) - called on every setting checkbox toggle (and
+        every preset click) so the numbers never lag behind what's
+        actually checked."""
         current_settings = self._current_settings_dict()
-
-        needs_fallback = bank_type in (ktts.BANK_TYPE_FULL_SYLLABLE, ktts.BANK_TYPE_DIPHONE)
-        self.fallback_combo.config(state="readonly" if needs_fallback else "disabled")
-        if needs_fallback:
-            self.fallback_label.grid()
-            self.fallback_combo.grid()
-        else:
-            self.fallback_label.grid_remove()
-            self.fallback_combo.grid_remove()
-
-        for t in BANK_TYPES:
-            count = required_count(t["type"], current_settings)
-            marker = " ← 선택됨" if t["type"] == bank_type else ""
-            self.type_count_labels[t["type"]].config(text=f"필요 {count}개{marker}")
+        self.total_count_label.config(text=f"필요 녹음 수: {required_count(current_settings)}개")
 
         for opt in SETTING_OPTIONS:
-            row_frame = self.setting_rows[opt["key"]]
-            if bank_type not in opt["types"]:
-                row_frame.grid_remove()
-                continue
-            row_frame.grid()
+            hypothetical = dict(current_settings)
+            hypothetical[opt["key"]] = True
             count_label = self.setting_count_labels[opt["key"]]
-            if opt["counts"]:
-                hypothetical = dict(current_settings)
-                hypothetical[opt["key"]] = True
-                count_label.config(text=f"(체크 시 총 {required_count(bank_type, hypothetical)}개)")
-            else:
-                count_label.config(text="")
+            count_label.config(text=f"(체크 시 총 {required_count(hypothetical)}개)")
 
     def _create_new_bank(self):
         name = self._pending_new_name
         if not name:
             return
-        bank_type = self._selected_bank_type()
-        settings = {
-            key: True for key, var in self.setting_vars.items()
-            if var.get() and bank_type in SETTING_OPTIONS_BY_KEY[key]["types"]
-        }
-        if bank_type in (ktts.BANK_TYPE_FULL_SYLLABLE, ktts.BANK_TYPE_DIPHONE):
-            fallback = self.fallback_var.get().strip()
-            if not fallback:
-                messagebox.showwarning(
-                    "한국어 TTS", "대체 목소리를 선택하세요 (이 목소리에 없는 음절을 대신 읽어줄 조각 방식 목소리)."
-                )
-                return
+        settings = self._current_settings_dict()
+        fallback = self.fallback_var.get().strip()
+        if fallback:
             settings["fallback_bank"] = fallback
 
         voice_dir = os.path.join(SOUND_ROOT, name)
         os.makedirs(voice_dir, exist_ok=True)
-        ktts.save_bank_manifest(voice_dir, {"schema_version": 1, "type": bank_type, "settings": settings, "audio": {}})
+        # "type" is legacy/display-only now (see korean_tts._migrate_legacy_
+        # type) - a new bank's real behavior comes entirely from `settings`.
+        ktts.save_bank_manifest(
+            voice_dir, {"schema_version": 1, "type": ktts.BANK_TYPE_PIECES, "settings": settings, "audio": {}}
+        )
         self.new_bank_frame.pack_forget()
         self._open_bank(name)
 
     def _open_bank(self, name):
         self.voice_dir = os.path.join(SOUND_ROOT, name)
         manifest = ktts.load_bank_manifest(self.voice_dir)
-        bank_type = manifest.get("type", ktts.BANK_TYPE_PIECES)
-        entry = BANK_TYPE_BY_ID.get(bank_type)
-        if entry is None:
-            messagebox.showerror("한국어 TTS", f"이 도구에서 지원하지 않는 뱅크 종류입니다: {bank_type}")
-            return
+        # Reuses korean_tts's own migration read so an already-shipped
+        # "diphone"/"full-syllable"-type bank reopens with exactly the
+        # walkthrough its implied settings would produce - never drifts
+        # from what synthesize() actually does with that same bank.
+        settings = ktts._migrate_legacy_type(manifest)
+        self.names, self.prompts = build_walkthrough(settings)
 
-        settings = manifest.get("settings") or {}
-        self.names = entry["names"](settings)
-        self.prompts = entry["prompts"](settings)
-        self.voice_hint.config(text=f"({entry['label']})")
+        labels = ["조각"]
+        if settings.get("dedicated_diphthongs"):
+            labels.append("디폰")
+        if settings.get("syllable_overrides"):
+            labels.append("완전한 음절")
+        self.voice_hint.config(text="(" + " + ".join(labels) + ")")
 
-        if bank_type == ktts.BANK_TYPE_PIECES:
-            self.override_char_var.set("")
-            self._update_override_status()
-            self.override_frame.pack(fill="x", padx=10, pady=(0, 8))
-        else:
-            self.override_frame.pack_forget()
+        self.override_char_var.set("")
+        self._update_override_status()
+        self.override_frame.pack(fill="x", padx=10, pady=(0, 8))
 
         self._refresh_voice_list()
         self._refresh_done_markers()
@@ -829,6 +823,7 @@ class App(tk.Tk):
         btns2 = ttk.Frame(frame)
         btns2.pack(fill="x", padx=8, pady=(2, 8))
         ttk.Button(btns2, text="적용 (파일에 저장)", command=self._apply_edit).pack(side="left")
+        ttk.Button(btns2, text="정규화 (자동 음량 맞춤)", command=self._normalize_now).pack(side="left", padx=8)
         ttk.Button(btns2, text="되돌리기 (원본 복원)", command=self._revert_edit).pack(side="left", padx=8)
 
         self.edit_status_label = ttk.Label(frame, text="", foreground="#888", wraplength=440, justify="left")
@@ -944,6 +939,26 @@ class App(tk.Tk):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _backup_and_overwrite(self, path, samples) -> bool:
+        """Shared by _apply_edit/_normalize_now: backs up the pre-edit file
+        to <name>.orig on first use (never overwritten again, so it always
+        holds the true original take), then writes `samples` over the
+        original. Returns False (after showing an error) on any failure."""
+        backup_path = path[:-4] + ".orig"
+        if not os.path.exists(backup_path):
+            try:
+                shutil.copy(path, backup_path)
+            except OSError as e:
+                messagebox.showerror("한국어 TTS", f"백업 실패: {e}")
+                return False
+        try:
+            with open(path, "wb") as f:
+                f.write(ktts.to_wav_bytes(samples))
+        except OSError as e:
+            messagebox.showerror("한국어 TTS", f"저장 실패: {e}")
+            return False
+        return True
+
     def _apply_edit(self):
         if not hasattr(self, "voice_dir") or not self.names:
             return
@@ -964,24 +979,42 @@ class App(tk.Tk):
             return
         edited = ktts.apply_override(array.array("h", raw), override)
 
-        backup_path = path[:-4] + ".orig"
-        if not os.path.exists(backup_path):
-            try:
-                shutil.copy(path, backup_path)
-            except OSError as e:
-                messagebox.showerror("한국어 TTS", f"백업 실패: {e}")
-                return
-
-        try:
-            with open(path, "wb") as f:
-                f.write(ktts.to_wav_bytes(edited))
-        except OSError as e:
-            messagebox.showerror("한국어 TTS", f"저장 실패: {e}")
+        if not self._backup_and_overwrite(path, edited):
             return
 
         self.edit_status_label.config(text=f"'{name}.wav'에 적용해 저장했습니다 (원본은 {name}.orig 로 보관됨).")
         self._refresh_edit_panel()
         self._refresh_done_markers()
+
+    def _normalize_now(self):
+        """One-click loudness normalization, baked directly into the file -
+        the same normalize_loudness() the engine already applies at
+        playback time (module defaults - this tool has no per-bank
+        AudioSettings context), applied once and saved, through the same
+        backup-then-overwrite safety net as _apply_edit. Additive to the
+        gain/trim controls above, not a replacement for them."""
+        if not hasattr(self, "voice_dir") or not self.names:
+            return
+        name = self._current_name()
+        path = os.path.join(self.voice_dir, name + ".wav")
+        if not os.path.exists(path):
+            messagebox.showinfo("한국어 TTS", "이 항목은 아직 녹음되지 않았습니다.")
+            return
+
+        try:
+            raw = ktts.read_sample(path, normalize=False, trim=False)
+        except Exception as e:
+            messagebox.showerror("한국어 TTS", f"읽기 실패: {e}")
+            return
+        normalized = ktts.normalize_loudness(array.array("h", raw))
+
+        if not self._backup_and_overwrite(path, normalized):
+            return
+
+        self.edit_status_label.config(
+            text=f"'{name}.wav'의 음량을 자동으로 맞춰 저장했습니다 (원본은 {name}.orig 로 보관됨)."
+        )
+        self._refresh_edit_panel()
 
     def _revert_edit(self):
         if not hasattr(self, "voice_dir") or not self.names:
