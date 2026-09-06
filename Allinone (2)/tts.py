@@ -217,10 +217,11 @@ def check(args):
     info(f"음성 폴더 : {sound_dir}")
     info(f"보유 파일 : {len(have)}개")
 
+    phonology = ktts.resolve_phonology_options(bank_settings)
+
     if bank_type == ktts.BANK_TYPE_FULL_SYLLABLE:
         naming = bank_settings.get("naming", "hex-codepoint")
-        preserve_ui = bool(bank_settings.get("preserve_consonant_ui"))
-        needed_chars = ktts.all_reachable_full_syllables(preserve_ui)
+        needed_chars = ktts.all_reachable_full_syllables(phonology)
         name_to_char = {ktts.syllable_filename(ch, naming): ch for ch in needed_chars}
         covered = have & set(name_to_char)
         missing_names = sorted(set(name_to_char) - have)
@@ -245,8 +246,7 @@ def check(args):
 
     if bank_type == ktts.BANK_TYPE_DIPHONE:
         naming = bank_settings.get("naming", "hex-codepoint")
-        preserve_ui = bool(bank_settings.get("preserve_consonant_ui"))
-        cv_chars = ktts.all_diphone_cv_blocks(preserve_ui)
+        cv_chars = ktts.all_diphone_cv_blocks(phonology)
         tail_chars = ktts.all_diphone_coda_tails()
         cv_names = {ktts.syllable_filename(ch, naming) for ch in cv_chars}
         tail_names = {ktts.syllable_filename(ch, naming) for ch in tail_chars}
@@ -272,7 +272,7 @@ def check(args):
                  + (" ..." if len(unused) > 30 else ""))
         return 0
 
-    needed = ktts.all_reachable_samples()
+    needed = ktts.all_reachable_samples(phonology)
     info(f"필요 음절 : {len(needed)}개 (한글 11,172자를 모두 읽는 데 필요한 조각)")
 
     missing = sorted(needed - have)

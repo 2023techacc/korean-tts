@@ -46,10 +46,16 @@ def decompose(ch: str) -> str:
 # ------------------------------------------------------
 
 COMPOUND_VOWELS = {"ㅘ": "ㅗㅏ", "ㅙ": "ㅗㅐ", "ㅚ": "ㅗㅐ", "ㅝ": "ㅜㅓ", "ㅞ": "ㅜㅔ", "ㅟ": "ㅜㅣ", "ㅢ": "ㅡㅣ"}
+# ㅚ's REAL orthographic split is ㅗ+ㅣ (used only when PhonologyOptions.
+# distinguish_oe_wae is on - see _syllable_to_jamo) - the default "ㅗㅐ"
+# above matches how it's normally pronounced in casual speech (merged with
+# ㅙ), which is why the shipped pieces library never needed a separate ㅚ
+# recording at all.
+COMPOUND_VOWELS_OE_DISTINCT = "ㅗㅣ"
 VOWEL_MERGE = {"ㅔ": "ㅐ", "ㅖ": "ㅒ"}
 ROMAN = {
-    "ㅏ": "a", "ㅓ": "eo", "ㅐ": "ae", "ㅡ": "eu", "ㅣ": "i", "ㅗ": "o", "ㅜ": "u",
-    "ㅑ": "ya", "ㅒ": "yae", "ㅕ": "yeo", "ㅛ": "yo", "ㅠ": "yu",
+    "ㅏ": "a", "ㅓ": "eo", "ㅐ": "ae", "ㅔ": "e", "ㅡ": "eu", "ㅣ": "i", "ㅗ": "o", "ㅜ": "u",
+    "ㅑ": "ya", "ㅒ": "yae", "ㅖ": "ye", "ㅕ": "yeo", "ㅛ": "yo", "ㅠ": "yu",
     "ㄱ": "g", "ㄴ": "n", "ㄷ": "d", "ㄹ": "l", "ㅁ": "m", "ㅂ": "b", "ㅅ": "s",
     "ㅇ": "ng", "ㅈ": "j", "ㅊ": "ch", "ㅋ": "k", "ㅌ": "t", "ㅍ": "p", "ㅎ": "h",
     "ㄲ": "gg", "ㄸ": "dd", "ㅆ": "ss", "ㅉ": "jj", "ㅃ": "bb",
@@ -145,20 +151,63 @@ J_GLIDE_TO_PLAIN = {"ㅑ": "ㅏ", "ㅒ": "ㅐ", "ㅕ": "ㅓ", "ㅖ": "ㅔ", "ㅛ
 PALATAL_ONSETS = {"ㅈ", "ㅉ", "ㅊ"}
 
 
-def _apply_local_vowel_rules(slots, preserve_consonant_ui=False):
-    """`preserve_consonant_ui` skips only the consonant+ㅢ->ㅣ collapse
-    (표준발음법 제5항 다만 3, e.g. 희망->히망) - an opt-in for banks that
-    want 자음+ㅢ syllables (e.g. 씌) to stay distinct and recordable rather
-    than always resolving to their ㅣ counterpart. The palatal-onset glide
-    collapse just above (자/쟈 etc, 다만 1) is a separate, undisputed rule
-    and stays unconditional either way."""
+class PhonologyOptions:
+    """Resolved set of optional phonology-rule exceptions for one bank -
+    which normally-merged/collapsed distinctions should instead stay
+    separate and individually recordable. Every field defaults to False
+    (today's behavior, mandatory merge/collapse, matching every bank with
+    no relevant setting - sound/default/ included). A bare boolean per
+    distinction was the pattern for the first one of these
+    (preserve_consonant_ui); bundled into one object here instead of
+    threading an ever-growing list of positional/keyword booleans through
+    every phonology function as more distinctions are added.
+
+    - preserve_consonant_ui: skip the consonant+ㅢ->ㅣ collapse (표준발음법
+      제5항 다만 3, 희망->히망). Affects all three bank types (it's applied
+      in _apply_local_vowel_rules, shared by every type's lookup path).
+    - distinguish_palatal_glide: skip the palatal-onset+y-glide collapse
+      (다만 1, 자/쟈, 저/져, 처/쳐 etc). Same scope as preserve_consonant_ui.
+    - distinguish_ae_e: skip merging ㅔ/ㅖ into ㅐ/ㅒ. Pieces-only - full-
+      syllable/diphone already treat these as distinct characters with no
+      merge step at all (they look up whole composed syllables, never
+      touching VOWEL_MERGE), so this only affects text_to_groups's split.
+    - distinguish_oe_wae: use ㅚ's real orthographic split (ㅗ+ㅣ) instead
+      of the default ㅗ+ㅐ that makes it sound identical to ㅙ. Pieces-only,
+      same reasoning as distinguish_ae_e.
+    """
+
+    _DEFAULTS = {
+        "preserve_consonant_ui": False,
+        "distinguish_palatal_glide": False,
+        "distinguish_ae_e": False,
+        "distinguish_oe_wae": False,
+    }
+
+    def __init__(self, **overrides):
+        for key, default in self._DEFAULTS.items():
+            setattr(self, key, bool(overrides.get(key, default)))
+
+
+def resolve_phonology_options(settings: dict) -> PhonologyOptions:
+    """Build a PhonologyOptions from a bank manifest's "settings" block.
+    Unknown keys are silently ignored (forward compatibility, same
+    philosophy as resolve_audio_settings)."""
+    return PhonologyOptions(**(settings if isinstance(settings, dict) else {}))
+
+
+def _apply_local_vowel_rules(slots, phonology=None):
+    """Applies the two undisputed-by-default local vowel rules (표준발음법
+    제5항 다만 1 and 다만 3), each individually skippable via `phonology`
+    (a PhonologyOptions - see its docstring) for a bank that wants that
+    specific distinction to stay recordable instead of always collapsing."""
+    phonology = phonology if phonology is not None else PhonologyOptions()
     for s in slots:
         if not isinstance(s, list):
             continue
         cho, jung = s[0], s[1]
-        if cho in PALATAL_ONSETS and jung in J_GLIDE_TO_PLAIN:
+        if cho in PALATAL_ONSETS and jung in J_GLIDE_TO_PLAIN and not phonology.distinguish_palatal_glide:
             s[1] = J_GLIDE_TO_PLAIN[jung]
-        elif jung == "ㅢ" and cho != "ㅇ" and not preserve_consonant_ui:
+        elif jung == "ㅢ" and cho != "ㅇ" and not phonology.preserve_consonant_ui:
             s[1] = "ㅣ"
     return slots
 
@@ -283,7 +332,7 @@ def all_full_syllables() -> set:
     return {chr(c) for c in range(HANGUL_START, HANGUL_END + 1)}
 
 
-def all_reachable_full_syllables(preserve_consonant_ui=False) -> set:
+def all_reachable_full_syllables(phonology=None) -> set:
     """The subset of all_full_syllables() actually reachable through
     _apply_local_vowel_rules + FINAL_MAP neutralization before a
     full-syllable/diphone lookup happens - analogous to how
@@ -291,15 +340,19 @@ def all_reachable_full_syllables(preserve_consonant_ui=False) -> set:
     raw sample-name space. By default: 363 distinct (cho,jung) pairs (of
     399 raw) x 8 surface finals (no-coda + the 7 audible finals) = 2,904
     syllables (~26% of the raw 11,172) - palatal-onset yotized vowels
-    (쟈/져/쳐 collapse to 자/저/처, always) and non-'ㅇ'-onset ㅢ (희->히,
-    unless preserve_consonant_ui) never survive to reach a filename. With
-    preserve_consonant_ui=True: 381 pairs x 8 = 3,048. Both counts verified
-    by running this exact logic against the real tables."""
+    (쟈/져/쳐 collapse to 자/저/처, unless distinguish_palatal_glide) and
+    non-'ㅇ'-onset ㅢ (희->히, unless preserve_consonant_ui) never survive
+    to reach a filename otherwise. Both collapses restore exactly 18 of
+    the 36 collapsed (cho,jung) pairs each, so either flag alone gives the
+    same count: 381x8=3,048. Both together restore all 36 -> 399x8=3,192
+    (every raw pair, nothing left to collapse). Counts verified by running
+    this exact logic against the real tables, not computed by hand."""
+    phonology = phonology if phonology is not None else PhonologyOptions()
     reachable = set()
     for cho in CHOSEONG:
         for jung in JUNGSEONG:
             slot = [cho, jung, ""]
-            _apply_local_vowel_rules([slot], preserve_consonant_ui)
+            _apply_local_vowel_rules([slot], phonology)
             norm_jung = slot[1]
             for jong in JONGSEONG:
                 norm_jong = FINAL_MAP.get(jong, jong) if jong else ""
@@ -307,16 +360,16 @@ def all_reachable_full_syllables(preserve_consonant_ui=False) -> set:
     return reachable
 
 
-def all_diphone_cv_blocks(preserve_consonant_ui=False) -> set:
+def all_diphone_cv_blocks(phonology=None) -> set:
     """One recording per reachable (onset, nucleus) pair, composed with no
     coda (jong="") - the "diphone" bank type's onset+vowel half. Same
-    reachable-pair definition and count as all_reachable_full_syllables()
-    (363, or 381 with preserve_consonant_ui)."""
+    reachable-pair definition and count as all_reachable_full_syllables()."""
+    phonology = phonology if phonology is not None else PhonologyOptions()
     blocks = set()
     for cho in CHOSEONG:
         for jung in JUNGSEONG:
             slot = [cho, jung, ""]
-            _apply_local_vowel_rules([slot], preserve_consonant_ui)
+            _apply_local_vowel_rules([slot], phonology)
             blocks.add(_compose(cho, slot[1], ""))
     return blocks
 
@@ -326,9 +379,9 @@ def all_diphone_coda_tails() -> set:
     (ㅇ) - the "diphone" bank type's nucleus+coda half. A null-onset
     syllable genuinely IS what a bare nucleus+coda sounds like (the same
     principle sound/default/'s existing "ab.wav"-style pieces already use).
-    Unaffected by preserve_consonant_ui: a fixed cho="ㅇ" is already exempt
-    from both local vowel collapse rules, so all 21 nuclei are always
-    reachable here. 21 nuclei x 7 audible finals = 147."""
+    Unaffected by any PhonologyOptions field: a fixed cho="ㅇ" is already
+    exempt from every local vowel collapse rule, so all 21 nuclei are
+    always reachable here. 21 nuclei x 7 audible finals = 147."""
     tails = set()
     for jung in JUNGSEONG:
         for jong in JONGSEONG:
@@ -339,11 +392,11 @@ def all_diphone_coda_tails() -> set:
     return tails
 
 
-def _parse_and_apply_rules(text: str, preserve_consonant_ui=False):
+def _parse_and_apply_rules(text: str, phonology=None):
     """Decompose `text` into (cho, jung, jong) slots and apply every
     pronunciation rule (local vowel rules, then cross-syllable ones) -
     the shared first step behind text_to_pronunciation and text_to_groups."""
-    return _apply_context_rules(_apply_local_vowel_rules(_parse(text), preserve_consonant_ui))
+    return _apply_context_rules(_apply_local_vowel_rules(_parse(text), phonology))
 
 
 def text_to_pronunciation(text: str) -> str:
@@ -369,20 +422,31 @@ def text_to_pronunciation(text: str) -> str:
     return "".join(out)
 
 
-def _syllable_to_jamo(cho, jung, jong):
+def _syllable_to_jamo(cho, jung, jong, phonology=None):
     """(cho, jung, jong) -> flat jamo list, applying batchim neutralisation
     (only relevant if liaison above didn't already resolve/move it) and
-    compound-vowel splitting."""
+    compound-vowel splitting.
+
+    `phonology.distinguish_oe_wae` (see PhonologyOptions) swaps ㅚ's default
+    split (ㅗㅐ, identical to ㅙ's) for its real orthographic one (ㅗㅣ).
+    `phonology.distinguish_ae_e` skips merging a resulting ㅔ/ㅖ into ㅐ/ㅒ.
+    Both pieces-only distinctions - full-syllable/diphone never call this
+    (they look up whole composed syllables directly, so ㅐ/ㅔ and ㅚ/ㅙ are
+    already naturally distinct for them)."""
+    phonology = phonology if phonology is not None else PhonologyOptions()
     a = [cho, jung] + ([jong] if jong else [])
     if a[-1] in CONSONANTS:
         a[-1] = FINAL_MAP.get(a[-1], a[-1])
 
     b = []
     for j in a:
-        b += list(COMPOUND_VOWELS.get(j, j))
+        if phonology.distinguish_oe_wae and j == "ㅚ":
+            b += list(COMPOUND_VOWELS_OE_DISTINCT)
+        else:
+            b += list(COMPOUND_VOWELS.get(j, j))
     c = []
     for j in b:
-        c += list(VOWEL_MERGE.get(j, j))
+        c += [j] if phonology.distinguish_ae_e else list(VOWEL_MERGE.get(j, j))
     return c
 
 
@@ -409,7 +473,7 @@ def _syllable_to_jamo(cho, jung, jong):
 # recording) are left exactly as before.
 
 def text_to_groups(text: str, dedicated_diphthong_check=None, syllable_override_check=None,
-                    naming: str = "hex-codepoint", preserve_consonant_ui=False):
+                    naming: str = "hex-codepoint", phonology=None):
     """Like text_to_samples, but keeps each character's sample name(s)
     grouped as (kind, [names]) so audio building knows which adjacent
     samples are lobes of the same syllable. A PAUSE is its own ('single',
@@ -457,7 +521,7 @@ def text_to_groups(text: str, dedicated_diphthong_check=None, syllable_override_
         if not groups or groups[-1][1] != [PAUSE]:
             groups.append(("single", [PAUSE]))
 
-    for slot in _parse_and_apply_rules(text, preserve_consonant_ui):
+    for slot in _parse_and_apply_rules(text, phonology):
         if not isinstance(slot, list):
             pause()
             continue
@@ -503,7 +567,7 @@ def text_to_groups(text: str, dedicated_diphthong_check=None, syllable_override_
                         groups.append(("coda", [glide_name, tail]))
                         continue
 
-        c = _syllable_to_jamo(*slot)
+        c = _syllable_to_jamo(*slot, phonology=phonology)
         if any(j not in ROMAN for j in c):
             pause()
             continue
@@ -546,20 +610,23 @@ def text_to_groups(text: str, dedicated_diphthong_check=None, syllable_override_
     return groups
 
 
-def text_to_samples(text: str):
+def text_to_samples(text: str, phonology=None):
     """Map Korean text to the flat sequence of sample names under sound/.
 
     Anything that is not a composed Hangul syllable (spaces, latin letters,
     punctuation, emoji) becomes a single PAUSE marker rather than raising.
     """
-    return [name for _, names in text_to_groups(text) for name in names]
+    return [name for _, names in text_to_groups(text, phonology=phonology) for name in names]
 
 
-def all_reachable_samples():
-    """Every sample name any Korean text could ever ask for. Used by --check."""
+def all_reachable_samples(phonology=None):
+    """Every sample name any Korean text could ever ask for, for a `pieces`
+    bank with the given PhonologyOptions - used by --check and by the
+    recorder tool to size a new pieces bank's walkthrough. Defaults (no
+    phonology) reproduce today's fixed 253-name set exactly."""
     names = set()
     for code in range(HANGUL_START, HANGUL_END + 1):
-        for name in text_to_samples(chr(code)):
+        for name in text_to_samples(chr(code), phonology=phonology):
             if name != PAUSE:
                 names.add(name)
     return names
@@ -1204,7 +1271,7 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
 def build_audio_full_syllable(
     text, sound_dir, fallback_dir=None, fallback_manifest=None,
     gap_ms=300, fade_ms=5, normalize=True, speed=1.0, stop_gap_ms=None,
-    audio_settings=None, naming="hex-codepoint", preserve_consonant_ui=False,
+    audio_settings=None, naming="hex-codepoint", phonology=None,
 ):
     """Assemble `text` from one whole-syllable recording per character - the
     "full-syllable" bank type's builder, an alternative to build_audio's
@@ -1238,7 +1305,7 @@ def build_audio_full_syllable(
     prev_ends_in_stop = False
     pending_pause = False
 
-    for slot in _parse_and_apply_rules(text, preserve_consonant_ui):
+    for slot in _parse_and_apply_rules(text, phonology):
         if not isinstance(slot, list):
             if not pending_pause:
                 track.extend(gap)
@@ -1290,7 +1357,7 @@ def build_audio_full_syllable(
 def build_audio_diphone(
     text, sound_dir, fallback_dir=None, fallback_manifest=None,
     gap_ms=300, fade_ms=5, normalize=True, speed=1.0, stop_gap_ms=None,
-    audio_settings=None, naming="hex-codepoint", preserve_consonant_ui=False,
+    audio_settings=None, naming="hex-codepoint", phonology=None,
 ):
     """Assemble `text` from dedicated onset+nucleus (CV block) and nucleus+
     coda (coda tail) recordings - the "diphone" bank type's builder, a
@@ -1324,7 +1391,7 @@ def build_audio_diphone(
     prev_ends_in_stop = False
     pending_pause = False
 
-    for slot in _parse_and_apply_rules(text, preserve_consonant_ui):
+    for slot in _parse_and_apply_rules(text, phonology):
         if not isinstance(slot, list):
             if not pending_pause:
                 track.extend(gap)
@@ -1404,7 +1471,7 @@ def synthesize(text, sound_root, voice, **kwargs):
     audio_settings = resolve_audio_settings(manifest)
     kwargs.setdefault("stop_gap_ms", audio_settings.default_stop_gap_ms)
 
-    preserve_consonant_ui = bool(settings_block.get("preserve_consonant_ui"))
+    phonology = resolve_phonology_options(settings_block)
 
     if bank_type == BANK_TYPE_PIECES:
         naming = settings_block.get("naming", "hex-codepoint")
@@ -1418,7 +1485,7 @@ def synthesize(text, sound_root, voice, **kwargs):
                 return os.path.exists(os.path.join(_dir, name + ".wav"))
         groups = text_to_groups(text, dedicated_diphthong_check=diphthong_check,
                                  syllable_override_check=override_check, naming=naming,
-                                 preserve_consonant_ui=preserve_consonant_ui)
+                                 phonology=phonology)
         return build_audio(groups, bank_dir, audio_settings=audio_settings, **kwargs)
 
     if bank_type == BANK_TYPE_FULL_SYLLABLE:
@@ -1431,7 +1498,7 @@ def synthesize(text, sound_root, voice, **kwargs):
         samples, missing, _fallback_used = build_audio_full_syllable(
             text, bank_dir, fallback_dir=fallback_dir, fallback_manifest=fallback_manifest,
             audio_settings=audio_settings, naming=naming,
-            preserve_consonant_ui=preserve_consonant_ui, **kwargs,
+            phonology=phonology, **kwargs,
         )
         return samples, missing
 
@@ -1445,7 +1512,7 @@ def synthesize(text, sound_root, voice, **kwargs):
         samples, missing, _fallback_used = build_audio_diphone(
             text, bank_dir, fallback_dir=fallback_dir, fallback_manifest=fallback_manifest,
             audio_settings=audio_settings, naming=naming,
-            preserve_consonant_ui=preserve_consonant_ui, **kwargs,
+            phonology=phonology, **kwargs,
         )
         return samples, missing
 

@@ -86,6 +86,19 @@ def build_prompt_map() -> dict:
     return examples
 
 
+def _pieces_names(settings: dict) -> list:
+    return sorted(ktts.all_reachable_samples(ktts.resolve_phonology_options(settings)))
+
+
+def _pieces_prompts(settings: dict) -> dict:
+    # build_prompt_map() is an unconditional full cartesian product (every
+    # onset x every ROMAN-covered vowel), independent of `settings` - it's
+    # already a strict superset of every PhonologyOptions combination's
+    # reachable-name set (verified: zero gaps for every field on its own or
+    # combined), so no phonology-aware branching is needed here at all.
+    return build_prompt_map()
+
+
 def _full_syllable_names(settings: dict) -> list:
     """Ordered hex-codepoint (or raw-Hangul, per settings) filenames for
     every REACHABLE composed Hangul syllable (korean_tts.
@@ -99,15 +112,13 @@ def _full_syllable_names(settings: dict) -> list:
     sort/grouping step needed for a speaker to stay in a similar mouth
     position through a batch."""
     naming = settings.get("naming", "hex-codepoint")
-    preserve_ui = bool(settings.get("preserve_consonant_ui"))
-    chars = sorted(ktts.all_reachable_full_syllables(preserve_ui))
+    chars = sorted(ktts.all_reachable_full_syllables(ktts.resolve_phonology_options(settings)))
     return [ktts.syllable_filename(ch, naming) for ch in chars]
 
 
 def _full_syllable_prompts(settings: dict) -> dict:
     naming = settings.get("naming", "hex-codepoint")
-    preserve_ui = bool(settings.get("preserve_consonant_ui"))
-    chars = ktts.all_reachable_full_syllables(preserve_ui)
+    chars = ktts.all_reachable_full_syllables(ktts.resolve_phonology_options(settings))
     return {ktts.syllable_filename(ch, naming): ch for ch in chars}
 
 
@@ -118,16 +129,32 @@ def _diphone_names(settings: dict) -> list:
     all_diphone_coda_tails. One flat list needs no new UI: App already
     treats names/prompts generically regardless of what they represent."""
     naming = settings.get("naming", "hex-codepoint")
-    preserve_ui = bool(settings.get("preserve_consonant_ui"))
-    chars = sorted(ktts.all_diphone_cv_blocks(preserve_ui)) + sorted(ktts.all_diphone_coda_tails())
+    phonology = ktts.resolve_phonology_options(settings)
+    chars = sorted(ktts.all_diphone_cv_blocks(phonology)) + sorted(ktts.all_diphone_coda_tails())
     return [ktts.syllable_filename(ch, naming) for ch in chars]
 
 
 def _diphone_prompts(settings: dict) -> dict:
     naming = settings.get("naming", "hex-codepoint")
-    preserve_ui = bool(settings.get("preserve_consonant_ui"))
-    chars = ktts.all_diphone_cv_blocks(preserve_ui) | ktts.all_diphone_coda_tails()
+    phonology = ktts.resolve_phonology_options(settings)
+    chars = ktts.all_diphone_cv_blocks(phonology) | ktts.all_diphone_coda_tails()
     return {ktts.syllable_filename(ch, naming): ch for ch in chars}
+
+
+def required_count(bank_type: str, settings: dict) -> int:
+    """How many recordings a bank of `bank_type` needs under `settings` -
+    the number shown live next to each setting in the new-bank creation
+    panel (see App._refresh_settings_panel). Shared with the (names,
+    prompts) sources below so the displayed count and the actual
+    walkthrough size can never drift apart."""
+    phonology = ktts.resolve_phonology_options(settings)
+    if bank_type == ktts.BANK_TYPE_PIECES:
+        return len(ktts.all_reachable_samples(phonology))
+    if bank_type == ktts.BANK_TYPE_FULL_SYLLABLE:
+        return len(ktts.all_reachable_full_syllables(phonology))
+    if bank_type == ktts.BANK_TYPE_DIPHONE:
+        return len(ktts.all_diphone_cv_blocks(phonology)) + len(ktts.all_diphone_coda_tails())
+    return 0
 
 
 # Per-bank-type (names, prompts) sources - see korean_tts.py's "Sound banks"
@@ -139,8 +166,8 @@ BANK_TYPES = [
     {
         "type": ktts.BANK_TYPE_PIECES,
         "label": "조각 방식 (기본)",
-        "names": lambda settings: sorted(ktts.all_reachable_samples()),
-        "prompts": lambda settings: build_prompt_map(),
+        "names": _pieces_names,
+        "prompts": _pieces_prompts,
     },
     {
         "type": ktts.BANK_TYPE_FULL_SYLLABLE,
@@ -157,24 +184,30 @@ BANK_TYPES = [
 ]
 BANK_TYPE_BY_ID = {t["type"]: t for t in BANK_TYPES}
 
-# Optional per-type settings, exposed as checkboxes in the new-bank creation
-# panel instead of requiring hand-editing bank.json afterward. The primary
-# type choice above stays a plain required dropdown - this is deliberately a
-# separate, secondary registry (settings WITHIN a type, not alternate types),
-# and deliberately just {key, label} dicts so a future option is one entry
-# away without touching _prepare_new_bank_ui/_create_new_bank again.
-ADVANCED_OPTIONS = {
-    ktts.BANK_TYPE_PIECES: [
-        {"key": "dedicated_diphthongs", "label": "이중모음 별도 녹음"},
-        {"key": "syllable_overrides", "label": "특정 음절 통째로 대체 녹음 허용"},
-    ],
-    ktts.BANK_TYPE_FULL_SYLLABLE: [
-        {"key": "preserve_consonant_ui", "label": "자음+ㅢ 구분하여 녹음 (예: 씌)"},
-    ],
-    ktts.BANK_TYPE_DIPHONE: [
-        {"key": "preserve_consonant_ui", "label": "자음+ㅢ 구분하여 녹음 (예: 씌)"},
-    ],
-}
+# Every optional setting selectable when creating a bank, as one flat list -
+# NOT a separate per-type registry, and the bank *type* above is presented
+# alongside these as just three more (mutually-exclusive) entries in the
+# same panel, not a separate dropdown-then-checkboxes two-step. "types" says
+# which bank types the setting applies to (it's hidden for the others);
+# "counts" says whether it changes required_count()'s result (dedicated_
+# diphthongs/syllable_overrides are open-ended optional extra recordings
+# with no fixed target count, so they show a fixed note instead of a live
+# number). Deliberately just plain dicts so a future distinction is one
+# entry away - see korean_tts.PhonologyOptions's own docstring for how to
+# add one at the engine level first.
+_ALL_TYPES = {ktts.BANK_TYPE_PIECES, ktts.BANK_TYPE_FULL_SYLLABLE, ktts.BANK_TYPE_DIPHONE}
+SETTING_OPTIONS = [
+    {"key": "preserve_consonant_ui", "label": "자음+ㅢ 구분 (예: 씌)", "types": _ALL_TYPES, "counts": True},
+    {"key": "distinguish_palatal_glide", "label": "구개음화 뒤 반모음 구분 (자/쟈, 저/져 등)",
+     "types": _ALL_TYPES, "counts": True},
+    {"key": "distinguish_ae_e", "label": "ㅐ/ㅔ 구분", "types": {ktts.BANK_TYPE_PIECES}, "counts": True},
+    {"key": "distinguish_oe_wae", "label": "ㅚ/ㅙ 구분", "types": {ktts.BANK_TYPE_PIECES}, "counts": True},
+    {"key": "dedicated_diphthongs", "label": "이중모음 별도 녹음 (개수 제한 없음, 선택 녹음)",
+     "types": {ktts.BANK_TYPE_PIECES}, "counts": False},
+    {"key": "syllable_overrides", "label": "특정 음절 통째로 대체 녹음 허용 (개수 제한 없음)",
+     "types": {ktts.BANK_TYPE_PIECES}, "counts": False},
+]
+SETTING_OPTIONS_BY_KEY = {opt["key"]: opt for opt in SETTING_OPTIONS}
 
 
 def _peak_level(pcm: bytes) -> int:
@@ -310,10 +343,14 @@ class App(tk.Tk):
         self.names = []
         self.index = 0
         self.voice = tk.StringVar(value="")
-        self.bank_type_var = tk.StringVar(value=BANK_TYPES[0]["label"])
+        # Bank type is presented as three mutually-exclusive checkboxes in
+        # the SAME panel as every other setting (see SETTING_OPTIONS), not a
+        # separate combobox-then-checkboxes two-step - "type" IS just a
+        # preset bundle of settings, from the UI's point of view.
+        self.type_vars = {t["type"]: tk.BooleanVar(value=(t is BANK_TYPES[0])) for t in BANK_TYPES}
+        self.setting_vars = {opt["key"]: tk.BooleanVar(value=False) for opt in SETTING_OPTIONS}
         self.fallback_var = tk.StringVar(value="")
         self._pending_new_name = None
-        self.advanced_vars = {}  # {settings key: tk.BooleanVar}, rebuilt per selected type
         self.override_char_var = tk.StringVar(value="")
         self.current_take = None  # bytes of the just-recorded, not-yet-saved take
         self.recorder = None
@@ -347,35 +384,55 @@ class App(tk.Tk):
         self.voice_hint = ttk.Label(top, text="", foreground="#888")
         self.voice_hint.pack(side="left", padx=10)
 
-        # New-bank type picker: hidden (not packed) until _load_voice() finds
-        # the typed name doesn't exist yet - shown once per new bank, never
-        # again once it's created (type is immutable after creation, since
-        # changing it would orphan already-recorded files under the old
-        # naming scheme).
+        # New-bank settings panel: hidden (not packed) until _load_voice()
+        # finds the typed name doesn't exist yet - shown once per new bank,
+        # never again once it's created (every setting here is immutable
+        # after creation, since changing type/phonology settings would
+        # orphan already-recorded files under the old naming/reachability
+        # scheme). The bank "type" is deliberately just three more
+        # (mutually-exclusive) checkboxes in this same list, not a separate
+        # dropdown picked before seeing the rest of the settings - see
+        # SETTING_OPTIONS and required_count() in the module-level registry.
         self.new_bank_frame = ttk.LabelFrame(self, text="새 목소리 만들기")
-        ttk.Label(self.new_bank_frame, text="녹음 방식:").grid(row=0, column=0, padx=8, pady=6, sticky="w")
-        self.type_combo = ttk.Combobox(
-            self.new_bank_frame, textvariable=self.bank_type_var, state="readonly", width=20,
-            values=[t["label"] for t in BANK_TYPES],
-        )
-        self.type_combo.current(0)
-        self.type_combo.grid(row=0, column=1, padx=8, pady=6, sticky="w")
-        self.type_combo.bind("<<ComboboxSelected>>", lambda _e: self._update_new_bank_fields())
+
+        self.type_count_labels = {}
+        for i, t in enumerate(BANK_TYPES):
+            ttk.Checkbutton(
+                self.new_bank_frame, text=t["label"], variable=self.type_vars[t["type"]],
+                command=lambda bt=t["type"]: self._on_type_toggled(bt),
+            ).grid(row=i, column=0, padx=8, pady=2, sticky="w")
+            count_label = ttk.Label(self.new_bank_frame, text="", foreground="#0a6")
+            count_label.grid(row=i, column=1, padx=4, pady=2, sticky="w")
+            self.type_count_labels[t["type"]] = count_label
+        row = len(BANK_TYPES)
 
         self.fallback_label = ttk.Label(self.new_bank_frame, text="빠진 음절 대체 목소리:")
-        self.fallback_label.grid(row=1, column=0, padx=8, pady=6, sticky="w")
+        self.fallback_label.grid(row=row, column=0, padx=8, pady=6, sticky="w")
         self.fallback_combo = ttk.Combobox(self.new_bank_frame, textvariable=self.fallback_var, state="disabled", width=20)
-        self.fallback_combo.grid(row=1, column=1, padx=8, pady=6, sticky="w")
+        self.fallback_combo.grid(row=row, column=1, padx=8, pady=6, sticky="w")
+        row += 1
+
+        ttk.Separator(self.new_bank_frame, orient="horizontal").grid(
+            row=row, column=0, columnspan=3, sticky="ew", padx=8, pady=6
+        )
+        row += 1
+
+        self.setting_count_labels = {}
+        self.setting_rows = {}
+        for opt in SETTING_OPTIONS:
+            row_frame = ttk.Frame(self.new_bank_frame)
+            row_frame.grid(row=row, column=0, columnspan=3, sticky="w", padx=8, pady=1)
+            ttk.Checkbutton(row_frame, text=opt["label"], variable=self.setting_vars[opt["key"]],
+                             command=self._refresh_settings_panel).pack(side="left")
+            count_label = ttk.Label(row_frame, text="", foreground="#888")
+            count_label.pack(side="left", padx=6)
+            self.setting_count_labels[opt["key"]] = count_label
+            self.setting_rows[opt["key"]] = row_frame
+            row += 1
 
         ttk.Button(self.new_bank_frame, text="만들기", command=self._create_new_bank).grid(
-            row=0, column=2, rowspan=2, padx=12
+            row=row, column=0, columnspan=3, pady=(8, 4)
         )
-        # Rebuilt per selected type by _update_new_bank_fields() (see
-        # ADVANCED_OPTIONS) - checkboxes for optional per-type settings, kept
-        # separate from the type picker above so the basic "pick a type and
-        # click 만들기" path never has to look at this. All default unchecked.
-        self.advanced_frame = ttk.Frame(self.new_bank_frame)
-        self.advanced_frame.grid(row=2, column=0, columnspan=3, padx=8, pady=(0, 6), sticky="w")
         # Not packed here - _prepare_new_bank_ui() packs it, _load_voice()/
         # _create_new_bank() pack_forget() it once a bank is open.
 
@@ -497,8 +554,8 @@ class App(tk.Tk):
             self._prepare_new_bank_ui(name)
 
     def _prepare_new_bank_ui(self, name):
-        """A brand-new voice name: show the type (+ fallback-bank, if
-        full-syllable) picker instead of creating the folder right away."""
+        """A brand-new voice name: show the settings panel (type included -
+        see SETTING_OPTIONS) instead of creating the folder right away."""
         self._pending_new_name = name
         fallback_choices = [
             b["name"] for b in ktts.list_banks(SOUND_ROOT)
@@ -511,43 +568,79 @@ class App(tk.Tk):
             self.fallback_var.set(fallback_choices[0])
         else:
             self.fallback_var.set("")
-        self.type_combo.current(0)
-        self._update_new_bank_fields()
+
+        for bt, var in self.type_vars.items():
+            var.set(bt == BANK_TYPES[0]["type"])
+        for var in self.setting_vars.values():
+            var.set(False)
+        self._refresh_settings_panel()
         self.new_bank_frame.pack(fill="x", padx=10, pady=(0, 8))
 
     def _selected_bank_type(self) -> str:
-        label = self.bank_type_var.get()
-        for t in BANK_TYPES:
-            if t["label"] == label:
-                return t["type"]
+        for bt, var in self.type_vars.items():
+            if var.get():
+                return bt
         return ktts.BANK_TYPE_PIECES
 
-    def _update_new_bank_fields(self):
+    def _current_settings_dict(self) -> dict:
+        return {key: True for key, var in self.setting_vars.items() if var.get()}
+
+    def _on_type_toggled(self, bank_type):
+        if self.type_vars[bank_type].get():
+            for bt, var in self.type_vars.items():
+                if bt != bank_type:
+                    var.set(False)
+        else:
+            # Exactly one type must always be selected - snap it back on
+            # rather than leaving none checked (radio-button semantics).
+            self.type_vars[bank_type].set(True)
+        self._refresh_settings_panel()
+
+    def _refresh_settings_panel(self):
+        """Recomputes every live count in the new-bank panel (see
+        required_count()) and shows/hides rows that don't apply to the
+        currently selected type - called on every type/setting checkbox
+        toggle so the numbers never lag behind what's actually checked."""
         bank_type = self._selected_bank_type()
+        current_settings = self._current_settings_dict()
+
         needs_fallback = bank_type in (ktts.BANK_TYPE_FULL_SYLLABLE, ktts.BANK_TYPE_DIPHONE)
         self.fallback_combo.config(state="readonly" if needs_fallback else "disabled")
+        if needs_fallback:
+            self.fallback_label.grid()
+            self.fallback_combo.grid()
+        else:
+            self.fallback_label.grid_remove()
+            self.fallback_combo.grid_remove()
 
-        for child in self.advanced_frame.winfo_children():
-            child.destroy()
-        self.advanced_vars = {}
-        options = ADVANCED_OPTIONS.get(bank_type, [])
-        if options:
-            ttk.Label(self.advanced_frame, text="고급 설정:", foreground="#555").grid(
-                row=0, column=0, sticky="w", pady=(4, 0)
-            )
-            for i, opt in enumerate(options):
-                var = tk.BooleanVar(value=False)
-                self.advanced_vars[opt["key"]] = var
-                ttk.Checkbutton(self.advanced_frame, text=opt["label"], variable=var).grid(
-                    row=i + 1, column=0, sticky="w"
-                )
+        for t in BANK_TYPES:
+            count = required_count(t["type"], current_settings)
+            marker = " ← 선택됨" if t["type"] == bank_type else ""
+            self.type_count_labels[t["type"]].config(text=f"필요 {count}개{marker}")
+
+        for opt in SETTING_OPTIONS:
+            row_frame = self.setting_rows[opt["key"]]
+            if bank_type not in opt["types"]:
+                row_frame.grid_remove()
+                continue
+            row_frame.grid()
+            count_label = self.setting_count_labels[opt["key"]]
+            if opt["counts"]:
+                hypothetical = dict(current_settings)
+                hypothetical[opt["key"]] = True
+                count_label.config(text=f"(체크 시 총 {required_count(bank_type, hypothetical)}개)")
+            else:
+                count_label.config(text="")
 
     def _create_new_bank(self):
         name = self._pending_new_name
         if not name:
             return
         bank_type = self._selected_bank_type()
-        settings = {key: True for key, var in self.advanced_vars.items() if var.get()}
+        settings = {
+            key: True for key, var in self.setting_vars.items()
+            if var.get() and bank_type in SETTING_OPTIONS_BY_KEY[key]["types"]
+        }
         if bank_type in (ktts.BANK_TYPE_FULL_SYLLABLE, ktts.BANK_TYPE_DIPHONE):
             fallback = self.fallback_var.get().strip()
             if not fallback:
