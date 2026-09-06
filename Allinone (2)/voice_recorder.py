@@ -497,6 +497,7 @@ class App(tk.Tk):
         # Not packed here - _open_bank() packs/hides it based on bank type.
 
         body = ttk.Frame(self)
+        self.body = body
         body.pack(fill="both", expand=True, padx=10, pady=4)
 
         list_frame = ttk.Frame(body)
@@ -607,7 +608,13 @@ class App(tk.Tk):
         for var in self.setting_vars.values():
             var.set(False)
         self._refresh_settings_panel()
-        self.new_bank_frame.pack(fill="x", padx=10, pady=(0, 8))
+        # before=self.body: without this, packing a widget after `body`
+        # (already packed with expand=True at startup) stacks it BELOW
+        # body instead of between `top` and `body`, so body's expand
+        # claims nearly all the window and this panel is squeezed into
+        # whatever sliver is left - verified this left the "만들기" button
+        # entirely unmapped (0 pixels) at the default window size.
+        self.new_bank_frame.pack(fill="x", padx=10, pady=(0, 8), before=self.body)
 
     def _current_settings_dict(self) -> dict:
         return {key: True for key, var in self.setting_vars.items() if var.get()}
@@ -669,7 +676,7 @@ class App(tk.Tk):
 
         self.override_char_var.set("")
         self._update_override_status()
-        self.override_frame.pack(fill="x", padx=10, pady=(0, 8))
+        self.override_frame.pack(fill="x", padx=10, pady=(0, 8), before=self.body)
 
         self._refresh_voice_list()
         self._refresh_done_markers()
