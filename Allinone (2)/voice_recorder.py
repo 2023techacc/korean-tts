@@ -86,19 +86,46 @@ def build_prompt_map() -> dict:
 
 def _full_syllable_names(settings: dict) -> list:
     """Ordered hex-codepoint (or raw-Hangul, per settings) filenames for
-    every composed Hangul syllable. Composed-Hangul codepoints are already
-    a mixed-radix encoding of (cho, jung, jong) - HANGUL_START + (cho*21 +
-    jung)*28 + jong - so plain ascending codepoint order (what range()
-    naturally gives) already groups by onset+vowel first, no separate
+    every REACHABLE composed Hangul syllable (korean_tts.
+    all_reachable_full_syllables()) - not the raw 11,172, since syllables
+    like 쟈 always resolve to 자's filename before a lookup ever happens
+    (see korean_tts.py's _apply_local_vowel_rules) and recording them would
+    be pure wasted effort. Composed-Hangul codepoints are already a
+    mixed-radix encoding of (cho, jung, jong) - HANGUL_START + (cho*21 +
+    jung)*28 + jong - so plain ascending codepoint order (what sorted()
+    naturally gives here) already groups by onset+vowel first, no separate
     sort/grouping step needed for a speaker to stay in a similar mouth
     position through a batch."""
     naming = settings.get("naming", "hex-codepoint")
-    return [ktts.syllable_filename(chr(c), naming) for c in range(ktts.HANGUL_START, ktts.HANGUL_END + 1)]
+    preserve_ui = bool(settings.get("preserve_consonant_ui"))
+    chars = sorted(ktts.all_reachable_full_syllables(preserve_ui))
+    return [ktts.syllable_filename(ch, naming) for ch in chars]
 
 
 def _full_syllable_prompts(settings: dict) -> dict:
     naming = settings.get("naming", "hex-codepoint")
-    return {ktts.syllable_filename(chr(c), naming): chr(c) for c in range(ktts.HANGUL_START, ktts.HANGUL_END + 1)}
+    preserve_ui = bool(settings.get("preserve_consonant_ui"))
+    chars = ktts.all_reachable_full_syllables(preserve_ui)
+    return {ktts.syllable_filename(ch, naming): ch for ch in chars}
+
+
+def _diphone_names(settings: dict) -> list:
+    """Merged, ordered name list for the "diphone" bank type: every CV
+    block (onset+nucleus) then every coda tail (nucleus+coda), each in
+    ascending-codepoint order - see korean_tts.all_diphone_cv_blocks/
+    all_diphone_coda_tails. One flat list needs no new UI: App already
+    treats names/prompts generically regardless of what they represent."""
+    naming = settings.get("naming", "hex-codepoint")
+    preserve_ui = bool(settings.get("preserve_consonant_ui"))
+    chars = sorted(ktts.all_diphone_cv_blocks(preserve_ui)) + sorted(ktts.all_diphone_coda_tails())
+    return [ktts.syllable_filename(ch, naming) for ch in chars]
+
+
+def _diphone_prompts(settings: dict) -> dict:
+    naming = settings.get("naming", "hex-codepoint")
+    preserve_ui = bool(settings.get("preserve_consonant_ui"))
+    chars = ktts.all_diphone_cv_blocks(preserve_ui) | ktts.all_diphone_coda_tails()
+    return {ktts.syllable_filename(ch, naming): ch for ch in chars}
 
 
 # Per-bank-type (names, prompts) sources - see korean_tts.py's "Sound banks"
@@ -119,8 +146,33 @@ BANK_TYPES = [
         "names": _full_syllable_names,
         "prompts": _full_syllable_prompts,
     },
+    {
+        "type": ktts.BANK_TYPE_DIPHONE,
+        "label": "온셋+중성 · 중성+받침 조각 (디폰)",
+        "names": _diphone_names,
+        "prompts": _diphone_prompts,
+    },
 ]
 BANK_TYPE_BY_ID = {t["type"]: t for t in BANK_TYPES}
+
+# Optional per-type settings, exposed as checkboxes in the new-bank creation
+# panel instead of requiring hand-editing bank.json afterward. The primary
+# type choice above stays a plain required dropdown - this is deliberately a
+# separate, secondary registry (settings WITHIN a type, not alternate types),
+# and deliberately just {key, label} dicts so a future option is one entry
+# away without touching _prepare_new_bank_ui/_create_new_bank again.
+ADVANCED_OPTIONS = {
+    ktts.BANK_TYPE_PIECES: [
+        {"key": "dedicated_diphthongs", "label": "이중모음 별도 녹음"},
+        {"key": "syllable_overrides", "label": "특정 음절 통째로 대체 녹음 허용"},
+    ],
+    ktts.BANK_TYPE_FULL_SYLLABLE: [
+        {"key": "preserve_consonant_ui", "label": "자음+ㅢ 구분하여 녹음 (예: 씌)"},
+    ],
+    ktts.BANK_TYPE_DIPHONE: [
+        {"key": "preserve_consonant_ui", "label": "자음+ㅢ 구분하여 녹음 (예: 씌)"},
+    ],
+}
 
 
 def _peak_level(pcm: bytes) -> int:
@@ -160,6 +212,8 @@ class App(tk.Tk):
         self.bank_type_var = tk.StringVar(value=BANK_TYPES[0]["label"])
         self.fallback_var = tk.StringVar(value="")
         self._pending_new_name = None
+        self.advanced_vars = {}  # {settings key: tk.BooleanVar}, rebuilt per selected type
+        self.override_char_var = tk.StringVar(value="")
         self.current_take = None  # bytes of the just-recorded, not-yet-saved take
         self.recorder = None
         self.recording = False
@@ -205,8 +259,40 @@ class App(tk.Tk):
         ttk.Button(self.new_bank_frame, text="만들기", command=self._create_new_bank).grid(
             row=0, column=2, rowspan=2, padx=12
         )
+        # Rebuilt per selected type by _update_new_bank_fields() (see
+        # ADVANCED_OPTIONS) - checkboxes for optional per-type settings, kept
+        # separate from the type picker above so the basic "pick a type and
+        # click 만들기" path never has to look at this. All default unchecked.
+        self.advanced_frame = ttk.Frame(self.new_bank_frame)
+        self.advanced_frame.grid(row=2, column=0, columnspan=3, padx=8, pady=(0, 6), sticky="w")
         # Not packed here - _prepare_new_bank_ui() packs it, _load_voice()/
         # _create_new_bank() pack_forget() it once a bank is open.
+
+        # Patch-a-syllable panel for an already-open "pieces" bank (see
+        # korean_tts.py's syllable_overrides setting): an open-ended "fix the
+        # syllable that sounds wrong" workflow, not a fixed walkthrough list,
+        # so it's deliberately NOT a BANK_TYPES registry entry - just an
+        # additive panel shown/hidden by _open_bank(). Reuses the SAME
+        # record/preview controls above (they don't reference a name at all,
+        # only self.current_take) - only the save destination differs.
+        self.override_frame = ttk.LabelFrame(self, text="특정 음절 다시 녹음 (전체 대체)")
+        ttk.Label(self.override_frame, text="음절:").grid(row=0, column=0, padx=8, pady=6, sticky="w")
+        override_entry = ttk.Entry(self.override_frame, textvariable=self.override_char_var, width=4, font=("", 16))
+        override_entry.grid(row=0, column=1, padx=4, pady=6, sticky="w")
+        self.override_char_var.trace_add("write", lambda *_a: self._update_override_status())
+        self.override_status_label = ttk.Label(self.override_frame, text="", foreground="#888")
+        self.override_status_label.grid(row=0, column=2, padx=8, pady=6, sticky="w")
+        ttk.Button(self.override_frame, text="이 음절로 저장", command=self._accept_override).grid(
+            row=0, column=3, padx=8, pady=6
+        )
+        ttk.Label(
+            self.override_frame,
+            text=("위의 ● 녹음 시작 / ▶ 들어보기로 녹음한 뒤 여기 '이 음절로 저장'을 누르면, 지금 목록에서 "
+                  "보고 있는 항목과 별개로 이 글자 전체를 통째로 대체하는 녹음이 저장됩니다 (특정 음절만 "
+                  "다시 녹음하고 싶을 때 사용)."),
+            wraplength=560, foreground="#888",
+        ).grid(row=1, column=0, columnspan=4, padx=8, pady=(0, 6), sticky="w")
+        # Not packed here - _open_bank() packs/hides it based on bank type.
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True, padx=10, pady=4)
@@ -291,6 +377,7 @@ class App(tk.Tk):
             self.new_bank_frame.pack_forget()
             self._open_bank(name)
         else:
+            self.override_frame.pack_forget()
             self._prepare_new_bank_ui(name)
 
     def _prepare_new_bank_ui(self, name):
@@ -320,16 +407,32 @@ class App(tk.Tk):
         return ktts.BANK_TYPE_PIECES
 
     def _update_new_bank_fields(self):
-        is_full_syllable = self._selected_bank_type() == ktts.BANK_TYPE_FULL_SYLLABLE
-        self.fallback_combo.config(state="readonly" if is_full_syllable else "disabled")
+        bank_type = self._selected_bank_type()
+        needs_fallback = bank_type in (ktts.BANK_TYPE_FULL_SYLLABLE, ktts.BANK_TYPE_DIPHONE)
+        self.fallback_combo.config(state="readonly" if needs_fallback else "disabled")
+
+        for child in self.advanced_frame.winfo_children():
+            child.destroy()
+        self.advanced_vars = {}
+        options = ADVANCED_OPTIONS.get(bank_type, [])
+        if options:
+            ttk.Label(self.advanced_frame, text="고급 설정:", foreground="#555").grid(
+                row=0, column=0, sticky="w", pady=(4, 0)
+            )
+            for i, opt in enumerate(options):
+                var = tk.BooleanVar(value=False)
+                self.advanced_vars[opt["key"]] = var
+                ttk.Checkbutton(self.advanced_frame, text=opt["label"], variable=var).grid(
+                    row=i + 1, column=0, sticky="w"
+                )
 
     def _create_new_bank(self):
         name = self._pending_new_name
         if not name:
             return
         bank_type = self._selected_bank_type()
-        settings = {}
-        if bank_type == ktts.BANK_TYPE_FULL_SYLLABLE:
+        settings = {key: True for key, var in self.advanced_vars.items() if var.get()}
+        if bank_type in (ktts.BANK_TYPE_FULL_SYLLABLE, ktts.BANK_TYPE_DIPHONE):
             fallback = self.fallback_var.get().strip()
             if not fallback:
                 messagebox.showwarning(
@@ -358,11 +461,60 @@ class App(tk.Tk):
         self.prompts = entry["prompts"](settings)
         self.voice_hint.config(text=f"({entry['label']})")
 
+        if bank_type == ktts.BANK_TYPE_PIECES:
+            self.override_char_var.set("")
+            self._update_override_status()
+            self.override_frame.pack(fill="x", padx=10, pady=(0, 8))
+        else:
+            self.override_frame.pack_forget()
+
         self._refresh_voice_list()
         self._refresh_done_markers()
         self.index = self._first_unrecorded_index()
         self._show_current()
         self.record_btn.config(state="normal" if (mic_record and mic_record.is_available()) else "disabled")
+
+    def _update_override_status(self):
+        ch = self.override_char_var.get().strip()
+        if not ch:
+            self.override_status_label.config(text="")
+            return
+        if len(ch) != 1 or not ktts.is_syllable(ch):
+            self.override_status_label.config(text="한 글자의 한글 음절을 입력하세요.")
+            return
+        if not hasattr(self, "voice_dir"):
+            return
+        name = ktts.syllable_filename(ch)
+        exists = os.path.exists(os.path.join(self.voice_dir, name + ".wav"))
+        self.override_status_label.config(text=f"파일: {name}.wav" + (" (이미 있음 - 덮어씀)" if exists else " (새로 만듦)"))
+
+    def _accept_override(self):
+        if not hasattr(self, "voice_dir"):
+            return
+        ch = self.override_char_var.get().strip()
+        if len(ch) != 1 or not ktts.is_syllable(ch):
+            messagebox.showwarning("한국어 TTS", "한 글자의 한글 음절을 입력하세요 (예: 학).")
+            return
+        if not self.current_take:
+            messagebox.showinfo("한국어 TTS", "먼저 위의 ● 녹음 시작 / ■ 녹음 중지로 녹음하세요.")
+            return
+        name = ktts.syllable_filename(ch)
+        path = os.path.join(self.voice_dir, name + ".wav")
+        try:
+            with open(path, "wb") as f:
+                f.write(to_wav_bytes(self.current_take))
+        except OSError as e:
+            messagebox.showerror("한국어 TTS", f"저장 실패: {e}")
+            return
+
+        manifest = ktts.load_bank_manifest(self.voice_dir)
+        settings = manifest.setdefault("settings", {})
+        if not settings.get("syllable_overrides"):
+            settings["syllable_overrides"] = True
+            ktts.save_bank_manifest(self.voice_dir, manifest)
+
+        self._update_override_status()
+        self.status_label.config(text=f"'{ch}' 전체를 통째로 대체하는 녹음을 저장했습니다 ({name}.wav).")
 
     def _refresh_done_markers(self):
         self.listbox.delete(0, "end")

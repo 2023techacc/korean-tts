@@ -219,12 +219,15 @@ def check(args):
 
     if bank_type == ktts.BANK_TYPE_FULL_SYLLABLE:
         naming = bank_settings.get("naming", "hex-codepoint")
-        needed_chars = ktts.all_full_syllables()
+        preserve_ui = bool(bank_settings.get("preserve_consonant_ui"))
+        needed_chars = ktts.all_reachable_full_syllables(preserve_ui)
         name_to_char = {ktts.syllable_filename(ch, naming): ch for ch in needed_chars}
         covered = have & set(name_to_char)
         missing_names = sorted(set(name_to_char) - have)
+        unused = sorted(have - set(name_to_char))
 
-        info(f"필요 음절 : {len(needed_chars)}개 (한글 전체)")
+        info(f"필요 음절 : {len(needed_chars)}개 (실제로 조회되는 음절만 - 한글 11,172자 중 발음 규칙으로 "
+             "미리 다른 음절로 합쳐지는 것은 제외)")
         info(f"직접 녹음됨: {len(covered)}개")
 
         fallback_name = bank_settings.get("fallback_bank")
@@ -235,6 +238,38 @@ def check(args):
             sample = [name_to_char[n] for n in missing_names[:60]]
             for i in range(0, len(sample), 12):
                 info("   " + " ".join(sample[i:i + 12]))
+        if unused:
+            info(f"\nℹ️  쓰이지 않는 파일 {len(unused)}개 (녹음은 되어 있지만 지금 조회되지 않음): "
+                 + " ".join(unused[:30]) + (" ..." if len(unused) > 30 else ""))
+        return 0
+
+    if bank_type == ktts.BANK_TYPE_DIPHONE:
+        naming = bank_settings.get("naming", "hex-codepoint")
+        preserve_ui = bool(bank_settings.get("preserve_consonant_ui"))
+        cv_chars = ktts.all_diphone_cv_blocks(preserve_ui)
+        tail_chars = ktts.all_diphone_coda_tails()
+        cv_names = {ktts.syllable_filename(ch, naming) for ch in cv_chars}
+        tail_names = {ktts.syllable_filename(ch, naming) for ch in tail_chars}
+
+        info(f"필요 조각 (온셋+중성) : {len(cv_names)}개 - 보유 {len(have & cv_names)}개")
+        info(f"필요 조각 (중성+받침) : {len(tail_names)}개 - 보유 {len(have & tail_names)}개")
+
+        fallback_name = bank_settings.get("fallback_bank")
+        missing_cv = sorted(cv_names - have)
+        missing_tail = sorted(tail_names - have)
+        if fallback_name:
+            info(f"둘 중 하나라도 없는 음절은 '{fallback_name}' 목소리로 통째로 대체 재생됩니다.")
+        else:
+            if missing_cv:
+                info(f"\n❌ 대체 목소리 없이 온셋+중성 {len(missing_cv)}개가 없습니다: " + " ".join(missing_cv[:30])
+                     + (" ..." if len(missing_cv) > 30 else ""))
+            if missing_tail:
+                info(f"\n❌ 대체 목소리 없이 중성+받침 {len(missing_tail)}개가 없습니다: " + " ".join(missing_tail[:30])
+                     + (" ..." if len(missing_tail) > 30 else ""))
+        unused = sorted(have - cv_names - tail_names)
+        if unused:
+            info(f"\nℹ️  쓰이지 않는 파일 {len(unused)}개: " + " ".join(unused[:30])
+                 + (" ..." if len(unused) > 30 else ""))
         return 0
 
     needed = ktts.all_reachable_samples()
