@@ -35,6 +35,8 @@ Every voice, including the original recordings, is a same-named subfolder under 
 
 Recording one: **`VoiceRecorder.exe`** (`Allinone (2)/voice_recorder.py`) walks through the 253 sample names the phonology engine actually uses, shows the real Korean character to say for each (mic capture via raw `winmm.dll` through ctypes — no extra dependency), and saves accepted takes straight into `sound/<name>/` — no separate conversion step, it's immediately usable everywhere above. See [`Allinone (2)/VOICE_RECORDER_README.txt`](Allinone%20%282%29/VOICE_RECORDER_README.txt).
 
+A voice folder can optionally carry a `bank.json` declaring which recording scheme ("bank type") it uses — the 253-piece scheme above is the default (`"pieces"`), and a `"full-syllable"` type (record every Hangul syllable individually, up to 11,172, optionally falling back to another voice for gaps) is also fully supported end-to-end in the CLI/desktop app/recorder tool. See [`Allinone (2)/TTS_README.txt`](Allinone%20%282%29/TTS_README.txt)'s "사운드 뱅크 종류" section for the manifest format and per-bank audio-setting overrides. Android and web only play `"pieces"` banks today — other types are silently hidden from their voice pickers rather than crashing.
+
 `sound/` is duplicated three times (CLI, Android assets, web) because each platform needs its own bundled copy. After changing/re-recording a sample, or adding a voice folder, run:
 
 ```

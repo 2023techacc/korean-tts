@@ -51,12 +51,10 @@ def speak(text, args, allow_play=True):
         return False
 
     try:
-        groups = ktts.text_to_groups(text)
-        sound_dir = ktts.voice_dir(args.sound_dir, args.voice)
         overrides_path = ktts.overrides_path_for_voice(args.overrides, args.voice)
         overrides = {} if args.no_overrides else ktts.load_overrides(overrides_path)
-        track, missing = ktts.build_audio(
-            groups, sound_dir, gap_ms=args.gap, fade_ms=args.fade,
+        track, missing = ktts.synthesize(
+            text, args.sound_dir, args.voice, gap_ms=args.gap, fade_ms=args.fade,
             normalize=not args.no_normalize, crossfade=not args.no_crossfade,
             speed=args.speed, stop_gap_ms=args.stop_gap, overrides=overrides,
         )
@@ -201,18 +199,45 @@ def interactive(args):
 
 
 def check(args):
-    """Report which samples the engine can ask for but sound/ doesn't have."""
+    """Report which samples/syllables the engine can ask for but the voice
+    doesn't have - what to check differs by bank type (see korean_tts.py's
+    "Sound banks" section)."""
     sound_dir = ktts.voice_dir(args.sound_dir, args.voice)
     if not os.path.isdir(sound_dir):
         info(f"❌ 음성 폴더가 없습니다: {sound_dir}")
         return 1
 
-    have = {f[:-4] for f in os.listdir(sound_dir) if f.lower().endswith(".wav")}
-    needed = ktts.all_reachable_samples()
+    manifest = ktts.load_bank_manifest(sound_dir)
+    bank_type = manifest.get("type", ktts.BANK_TYPE_PIECES)
+    bank_settings = manifest.get("settings") or {}
+    have = ktts.list_bank_files(sound_dir)
 
     info(f"목소리     : {args.voice}")
+    info(f"뱅크 종류  : {bank_type}")
     info(f"음성 폴더 : {sound_dir}")
     info(f"보유 파일 : {len(have)}개")
+
+    if bank_type == ktts.BANK_TYPE_FULL_SYLLABLE:
+        naming = bank_settings.get("naming", "hex-codepoint")
+        needed_chars = ktts.all_full_syllables()
+        name_to_char = {ktts.syllable_filename(ch, naming): ch for ch in needed_chars}
+        covered = have & set(name_to_char)
+        missing_names = sorted(set(name_to_char) - have)
+
+        info(f"필요 음절 : {len(needed_chars)}개 (한글 전체)")
+        info(f"직접 녹음됨: {len(covered)}개")
+
+        fallback_name = bank_settings.get("fallback_bank")
+        if fallback_name:
+            info(f"나머지 {len(missing_names)}개는 '{fallback_name}' 목소리로 대체 재생됩니다.")
+        elif missing_names:
+            info(f"\n❌ 대체 목소리(fallback_bank)가 없어 재생 불가능한 음절 {len(missing_names)}개:")
+            sample = [name_to_char[n] for n in missing_names[:60]]
+            for i in range(0, len(sample), 12):
+                info("   " + " ".join(sample[i:i + 12]))
+        return 0
+
+    needed = ktts.all_reachable_samples()
     info(f"필요 음절 : {len(needed)}개 (한글 11,172자를 모두 읽는 데 필요한 조각)")
 
     missing = sorted(needed - have)

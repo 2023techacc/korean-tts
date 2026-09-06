@@ -71,16 +71,29 @@ for (const [input, key, transform] of [
 }
 
 // sound/ itself is always the "default" voice; sound/voices.json (written
-// by sync-sound-assets.bat) lists any additional voice subfolders - see
-// korean_tts.py's list_voices for the same convention on the other
-// platforms. Missing/unreachable manifest just means "only default".
+// by sync-sound-assets.bat) lists any additional voice subfolders as
+// {name, type} objects - see korean_tts.py's "Sound banks" section for the
+// full picture (bank.json, other types like "full-syllable"). Only types
+// this page actually knows how to build audio for are offered here - a
+// bank of some other type still gets synced and listed in voices.json (so
+// nothing needs re-running once this page's audio engine learns a new
+// type), it just doesn't show up as selectable yet. Missing/unreachable
+// manifest, or an old plain-string-array voices.json, just means "only
+// default".
+const KNOWN_BANK_TYPES = ["pieces"];
+
 async function initVoices() {
   let voices = [DEFAULT_VOICE];
   try {
     const res = await fetch("sound/voices.json");
     if (res.ok) {
       const data = await res.json();
-      if (Array.isArray(data.voices) && data.voices.length) voices = data.voices;
+      if (Array.isArray(data.voices) && data.voices.length) {
+        const names = data.voices
+          .filter((v) => typeof v === "string" || KNOWN_BANK_TYPES.includes(v.type))
+          .map((v) => (typeof v === "string" ? v : v.name));
+        if (names.length) voices = names;
+      }
     }
   } catch {
     // no manifest reachable - just the default voice

@@ -170,6 +170,12 @@ class App(tk.Tk):
     def overrides_path(self) -> str:
         return ktts.overrides_path_for_voice(OVERRIDES_PATH, self.settings["voice"])
 
+    def bank_manifest(self) -> dict:
+        return ktts.load_bank_manifest(self.current_sound_dir())
+
+    def audio_settings(self):
+        return ktts.resolve_audio_settings(self.bank_manifest())
+
     def set_voice(self, voice: str) -> None:
         """Switch the active voice: persist the outgoing voice's overrides
         (so in-progress fine-tuning is never silently lost on switch), then
@@ -263,9 +269,8 @@ class MainTab(ttk.Frame):
         self.pron_label.config(text=f"발음: {ktts.text_to_pronunciation(text)}")
 
     def _build(self, text: str):
-        groups = ktts.text_to_groups(text)
-        return ktts.build_audio(
-            groups, self.app.current_sound_dir(),
+        return ktts.synthesize(
+            text, SOUND_ROOT, self.app.settings["voice"],
             gap_ms=int(self.app.settings["gap_ms"]),
             stop_gap_ms=int(self.app.settings["stop_gap_ms"]),
             speed=self.app.settings["speed"],
@@ -278,7 +283,11 @@ class MainTab(ttk.Frame):
             return
 
         def work():
-            track, missing = self._build(text)
+            try:
+                track, missing = self._build(text)
+            except ktts.AudioError as e:
+                self.after(0, lambda: messagebox.showerror("한국어 TTS", f"오디오 오류: {e}"))
+                return
             if not len(track):
                 self.after(0, lambda: messagebox.showinfo("한국어 TTS", "읽을 수 있는 한글이 없습니다."))
                 return
@@ -302,7 +311,11 @@ class MainTab(ttk.Frame):
             return
 
         def work():
-            track, missing = self._build(text)
+            try:
+                track, missing = self._build(text)
+            except ktts.AudioError as e:
+                self.after(0, lambda: messagebox.showerror("한국어 TTS", f"오디오 오류: {e}"))
+                return
             if not len(track):
                 self.after(0, lambda: messagebox.showinfo("한국어 TTS", "읽을 수 있는 한글이 없습니다."))
                 return
@@ -544,7 +557,7 @@ class TuningTab(ttk.Frame):
         sound_dir = self.app.current_sound_dir()
         if not os.path.isdir(sound_dir):
             return []
-        return sorted(f[:-4] for f in os.listdir(sound_dir) if f.lower().endswith(".wav"))
+        return sorted(ktts.list_bank_files(sound_dir))
 
     def _refresh_list(self):
         query = self.search_var.get().strip().lower()
@@ -569,7 +582,10 @@ class TuningTab(ttk.Frame):
     def _load_raw(self, name):
         if name not in self._raw_cache:
             path = os.path.join(self.app.current_sound_dir(), name + ".wav")
-            self._raw_cache[name] = ktts.read_sample(path) if os.path.exists(path) else None
+            self._raw_cache[name] = (
+                ktts.read_sample(path, audio_settings=self.app.audio_settings())
+                if os.path.exists(path) else None
+            )
         return self._raw_cache[name]
 
     def _on_select(self, _evt=None):
@@ -679,7 +695,7 @@ class TuningTab(ttk.Frame):
             if not os.path.exists(path):
                 self.after(0, lambda: messagebox.showwarning("한국어 TTS", f"파일이 없습니다: {name}.wav"))
                 return
-            samples = ktts.read_sample(path, override=override)
+            samples = ktts.read_sample(path, override=override, audio_settings=self.app.audio_settings())
             wav_bytes = ktts.to_wav_bytes(samples)
             self.app.player.play(wav_bytes)
 

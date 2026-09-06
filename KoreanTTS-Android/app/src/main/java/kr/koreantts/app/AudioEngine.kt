@@ -85,12 +85,34 @@ object AudioEngine {
 
     private fun assetPath(voice: String, name: String): String = "sound/$voice/$name.wav"
 
+    // Bank types this app actually knows how to play - see korean_tts.py's
+    // "Sound banks" section for the full picture (bank.json, other types
+    // like "full-syllable"). Anything else is filtered out of listVoices()
+    // below rather than risking a crash or wrong assembly trying to play
+    // it - a bank of an unsupported type just never appears in the picker.
+    private val KNOWN_BANK_TYPES = setOf("pieces")
+
+    /** sound/<voice>/bank.json's "type" field, or "pieces" if the file is
+     * missing/unreadable/malformed - same fallback korean_tts.py's
+     * load_bank_manifest() uses. org.json is part of the Android platform
+     * SDK (no Gradle dependency needed), matching this app's zero third-
+     * party-dependency approach everywhere else. */
+    private fun bankType(assets: AssetManager, voice: String): String {
+        return try {
+            val text = assets.open("sound/$voice/bank.json").bufferedReader().use { it.readText() }
+            org.json.JSONObject(text).optString("type", "pieces")
+        } catch (e: Exception) {
+            "pieces"
+        }
+    }
+
     /**
-     * Voices bundled in assets/sound/: any subfolder name, [DEFAULT_VOICE]
-     * first if present. AssetManager.list() on a leaf file returns an empty
-     * array, so - since every real sample name always ends in ".wav" and no
-     * voice folder ever will - anything listed that ISN'T a ".wav" name is
-     * a voice folder, with no need for a separate is-this-a-directory check.
+     * Voices bundled in assets/sound/: any subfolder name whose bank.json
+     * (if present) declares a type this app knows how to play, [DEFAULT_VOICE]
+     * first. AssetManager.list() on a leaf file returns an empty array, so -
+     * since every real sample name always ends in ".wav" and no voice folder
+     * ever will - anything listed that ISN'T a ".wav" name is a voice folder,
+     * with no need for a separate is-this-a-directory check.
      */
     fun listVoices(assets: AssetManager): List<String> {
         val entries = try {
@@ -98,7 +120,9 @@ object AudioEngine {
         } catch (e: java.io.IOException) {
             emptyArray()
         }
-        val voices = entries.filterNot { it.endsWith(".wav", ignoreCase = true) }.toMutableList()
+        val voices = entries.filterNot { it.endsWith(".wav", ignoreCase = true) }
+            .filter { bankType(assets, it) in KNOWN_BANK_TYPES }
+            .toMutableList()
         if (voices.remove(DEFAULT_VOICE)) voices.add(0, DEFAULT_VOICE)
         return voices.ifEmpty { listOf(DEFAULT_VOICE) }
     }

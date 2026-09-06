@@ -84,6 +84,45 @@ def build_prompt_map() -> dict:
     return examples
 
 
+def _full_syllable_names(settings: dict) -> list:
+    """Ordered hex-codepoint (or raw-Hangul, per settings) filenames for
+    every composed Hangul syllable. Composed-Hangul codepoints are already
+    a mixed-radix encoding of (cho, jung, jong) - HANGUL_START + (cho*21 +
+    jung)*28 + jong - so plain ascending codepoint order (what range()
+    naturally gives) already groups by onset+vowel first, no separate
+    sort/grouping step needed for a speaker to stay in a similar mouth
+    position through a batch."""
+    naming = settings.get("naming", "hex-codepoint")
+    return [ktts.syllable_filename(chr(c), naming) for c in range(ktts.HANGUL_START, ktts.HANGUL_END + 1)]
+
+
+def _full_syllable_prompts(settings: dict) -> dict:
+    naming = settings.get("naming", "hex-codepoint")
+    return {ktts.syllable_filename(chr(c), naming): chr(c) for c in range(ktts.HANGUL_START, ktts.HANGUL_END + 1)}
+
+
+# Per-bank-type (names, prompts) sources - see korean_tts.py's "Sound banks"
+# section. App only ever needs these two things per type (confirmed while
+# designing this: every other part of App - mic capture, progress/resume,
+# record/preview/accept/save mechanics, the whole UI shell - already works
+# on any (names, prompts) pair with no further changes).
+BANK_TYPES = [
+    {
+        "type": ktts.BANK_TYPE_PIECES,
+        "label": "조각 방식 (기본)",
+        "names": lambda settings: sorted(ktts.all_reachable_samples()),
+        "prompts": lambda settings: build_prompt_map(),
+    },
+    {
+        "type": ktts.BANK_TYPE_FULL_SYLLABLE,
+        "label": "완전한 음절 통째로",
+        "names": _full_syllable_names,
+        "prompts": _full_syllable_prompts,
+    },
+]
+BANK_TYPE_BY_ID = {t["type"]: t for t in BANK_TYPES}
+
+
 def _peak_level(pcm: bytes) -> int:
     """Max absolute 16-bit sample value in `pcm` - a quick way to tell a
     real recording from near-silence (muted mic, wrong input device, or
@@ -112,12 +151,15 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("한국어 TTS - 목소리 녹음")
-        self.geometry("720x560")
+        self.geometry("760x640")
 
-        self.prompts = build_prompt_map()
-        self.names = sorted(ktts.all_reachable_samples())
+        self.prompts = {}
+        self.names = []
         self.index = 0
         self.voice = tk.StringVar(value="")
+        self.bank_type_var = tk.StringVar(value=BANK_TYPES[0]["label"])
+        self.fallback_var = tk.StringVar(value="")
+        self._pending_new_name = None
         self.current_take = None  # bytes of the just-recorded, not-yet-saved take
         self.recorder = None
         self.recording = False
@@ -140,6 +182,32 @@ class App(tk.Tk):
         self.voice_hint = ttk.Label(top, text="", foreground="#888")
         self.voice_hint.pack(side="left", padx=10)
 
+        # New-bank type picker: hidden (not packed) until _load_voice() finds
+        # the typed name doesn't exist yet - shown once per new bank, never
+        # again once it's created (type is immutable after creation, since
+        # changing it would orphan already-recorded files under the old
+        # naming scheme).
+        self.new_bank_frame = ttk.LabelFrame(self, text="새 목소리 만들기")
+        ttk.Label(self.new_bank_frame, text="녹음 방식:").grid(row=0, column=0, padx=8, pady=6, sticky="w")
+        self.type_combo = ttk.Combobox(
+            self.new_bank_frame, textvariable=self.bank_type_var, state="readonly", width=20,
+            values=[t["label"] for t in BANK_TYPES],
+        )
+        self.type_combo.current(0)
+        self.type_combo.grid(row=0, column=1, padx=8, pady=6, sticky="w")
+        self.type_combo.bind("<<ComboboxSelected>>", lambda _e: self._update_new_bank_fields())
+
+        self.fallback_label = ttk.Label(self.new_bank_frame, text="빠진 음절 대체 목소리:")
+        self.fallback_label.grid(row=1, column=0, padx=8, pady=6, sticky="w")
+        self.fallback_combo = ttk.Combobox(self.new_bank_frame, textvariable=self.fallback_var, state="disabled", width=20)
+        self.fallback_combo.grid(row=1, column=1, padx=8, pady=6, sticky="w")
+
+        ttk.Button(self.new_bank_frame, text="만들기", command=self._create_new_bank).grid(
+            row=0, column=2, rowspan=2, padx=12
+        )
+        # Not packed here - _prepare_new_bank_ui() packs it, _load_voice()/
+        # _create_new_bank() pack_forget() it once a bank is open.
+
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True, padx=10, pady=4)
 
@@ -152,8 +220,9 @@ class App(tk.Tk):
         scrollbar.pack(side="left", fill="y")
         self.listbox.config(yscrollcommand=scrollbar.set)
         self.listbox.bind("<<ListboxSelect>>", self._on_list_select)
-        for name in self.names:
-            self.listbox.insert("end", name)
+        # Populated once a bank is opened (_open_bank -> _refresh_done_markers) -
+        # self.names is empty until then, since which items exist depends on
+        # the bank's type.
 
         main = ttk.Frame(body)
         main.pack(side="left", fill="both", expand=True, padx=16)
@@ -218,8 +287,77 @@ class App(tk.Tk):
             )
             return
 
+        if os.path.isdir(os.path.join(SOUND_ROOT, name)):
+            self.new_bank_frame.pack_forget()
+            self._open_bank(name)
+        else:
+            self._prepare_new_bank_ui(name)
+
+    def _prepare_new_bank_ui(self, name):
+        """A brand-new voice name: show the type (+ fallback-bank, if
+        full-syllable) picker instead of creating the folder right away."""
+        self._pending_new_name = name
+        fallback_choices = [
+            b["name"] for b in ktts.list_banks(SOUND_ROOT)
+            if b["manifest"].get("type", ktts.BANK_TYPE_PIECES) == ktts.BANK_TYPE_PIECES
+        ]
+        self.fallback_combo["values"] = fallback_choices
+        if ktts.DEFAULT_VOICE in fallback_choices:
+            self.fallback_var.set(ktts.DEFAULT_VOICE)
+        elif fallback_choices:
+            self.fallback_var.set(fallback_choices[0])
+        else:
+            self.fallback_var.set("")
+        self.type_combo.current(0)
+        self._update_new_bank_fields()
+        self.new_bank_frame.pack(fill="x", padx=10, pady=(0, 8))
+
+    def _selected_bank_type(self) -> str:
+        label = self.bank_type_var.get()
+        for t in BANK_TYPES:
+            if t["label"] == label:
+                return t["type"]
+        return ktts.BANK_TYPE_PIECES
+
+    def _update_new_bank_fields(self):
+        is_full_syllable = self._selected_bank_type() == ktts.BANK_TYPE_FULL_SYLLABLE
+        self.fallback_combo.config(state="readonly" if is_full_syllable else "disabled")
+
+    def _create_new_bank(self):
+        name = self._pending_new_name
+        if not name:
+            return
+        bank_type = self._selected_bank_type()
+        settings = {}
+        if bank_type == ktts.BANK_TYPE_FULL_SYLLABLE:
+            fallback = self.fallback_var.get().strip()
+            if not fallback:
+                messagebox.showwarning(
+                    "한국어 TTS", "대체 목소리를 선택하세요 (이 목소리에 없는 음절을 대신 읽어줄 조각 방식 목소리)."
+                )
+                return
+            settings["fallback_bank"] = fallback
+
+        voice_dir = os.path.join(SOUND_ROOT, name)
+        os.makedirs(voice_dir, exist_ok=True)
+        ktts.save_bank_manifest(voice_dir, {"schema_version": 1, "type": bank_type, "settings": settings, "audio": {}})
+        self.new_bank_frame.pack_forget()
+        self._open_bank(name)
+
+    def _open_bank(self, name):
         self.voice_dir = os.path.join(SOUND_ROOT, name)
-        os.makedirs(self.voice_dir, exist_ok=True)
+        manifest = ktts.load_bank_manifest(self.voice_dir)
+        bank_type = manifest.get("type", ktts.BANK_TYPE_PIECES)
+        entry = BANK_TYPE_BY_ID.get(bank_type)
+        if entry is None:
+            messagebox.showerror("한국어 TTS", f"이 도구에서 지원하지 않는 뱅크 종류입니다: {bank_type}")
+            return
+
+        settings = manifest.get("settings") or {}
+        self.names = entry["names"](settings)
+        self.prompts = entry["prompts"](settings)
+        self.voice_hint.config(text=f"({entry['label']})")
+
         self._refresh_voice_list()
         self._refresh_done_markers()
         self.index = self._first_unrecorded_index()

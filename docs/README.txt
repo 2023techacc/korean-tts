@@ -92,6 +92,12 @@ sound\voices.json 이 사용 가능한 목소리 목록입니다 (sync-sound-ass
 방법은 ..\Allinone (2)\TTS_README.txt 의 "여러 목소리" 항목 참고 - 그
 폴더 구조를 그대로 sync-sound-assets.bat 이 이 sound\ 로도 복사해줍니다.
 
+각 항목은 {"name": ..., "type": ...} 형태이고, 이 페이지는 아직 "pieces"
+(조각 방식) 종류만 재생할 수 있습니다 - 다른 사운드 뱅크 종류(예: 완전한
+음절 통째로 녹음, TTS_README.txt의 "사운드 뱅크 종류" 항목 참고)의
+목소리는 voices.json에는 나오지만 설정 화면 드롭다운에는 나타나지
+않습니다 (app.js의 KNOWN_BANK_TYPES 목록에 없는 종류는 걸러냄).
+
 CLI/APK/EXE와의 차이점
 -----------------------
 - 설정(속도/간격/볼륨/받침 뒤 간격/목소리)은 CLI, Android 앱과 동일하게

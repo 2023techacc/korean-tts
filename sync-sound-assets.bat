@@ -38,7 +38,7 @@ echo   %SRC%
 echo   -^> %DST_ANDROID%
 echo.
 
-robocopy "%SRC%" "%DST_ANDROID%" *.wav /MIR /NDL /NJH
+robocopy "%SRC%" "%DST_ANDROID%" *.wav bank.json /MIR /NDL /NJH
 
 if %ERRORLEVEL% GEQ 8 goto :robofail_android
 
@@ -48,7 +48,7 @@ echo   %SRC%
 echo   -^> %DST_WEB%
 echo.
 
-robocopy "%SRC%" "%DST_WEB%" *.wav /MIR /NDL /NJH
+robocopy "%SRC%" "%DST_WEB%" *.wav bank.json /MIR /NDL /NJH
 
 if %ERRORLEVEL% GEQ 8 goto :robofail_web
 
@@ -88,12 +88,27 @@ call :write_voice "%~n1"
 goto :eof
 
 :write_voice
+call :get_bank_type "%~1" VTYPE
 if "%FIRST%"=="1" (
     set "FIRST=0"
-    >> "%VOICES_JSON%" echo     "%~1"
+    >> "%VOICES_JSON%" echo     {"name": "%~1", "type": "%VTYPE%"}
 ) else (
-    >> "%VOICES_JSON%" echo     ,"%~1"
+    >> "%VOICES_JSON%" echo     ,{"name": "%~1", "type": "%VTYPE%"}
 )
+goto :eof
+
+REM Reads <SRC>\<voice name>\bank.json's "type" field (defaulting to
+REM "pieces" if the file is missing/unreadable/malformed - same fallback
+REM korean_tts.load_bank_manifest() uses). pushd's into SRC first and uses
+REM a path relative to it so the voice name never needs quoting alongside
+REM the literal "(2)" in the Allinone (2) path - see the file-header note
+REM on why that combination is avoided everywhere in this script.
+:get_bank_type
+set "GBT_RESULT=pieces"
+pushd "%SRC%"
+for /f "usebackq delims=" %%T in (`py -c "import json, os; p = os.path.join(r'%~1', 'bank.json'); d = json.load(open(p, encoding='utf-8')) if os.path.exists(p) else {}; print(d.get('type', 'pieces') if isinstance(d, dict) else 'pieces')" 2^>nul`) do set "GBT_RESULT=%%T"
+popd
+set "%~2=%GBT_RESULT%"
 goto :eof
 
 :nosrc

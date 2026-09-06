@@ -256,6 +256,27 @@ def _compose(cho, jung, jong):
     return chr(HANGUL_START + (CHO_INDEX[cho] * 21 + JUNG_INDEX[jung]) * 28 + JONG_INDEX[jong])
 
 
+def syllable_filename(ch: str, naming: str = "hex-codepoint") -> str:
+    """Filesystem-safe base name (no extension) for one composed Hangul
+    character - used by the full-syllable bank type and by dedicated-
+    diphthong pieces (see "Sound banks" below). Hex codepoint (ASCII, e.g.
+    "ac00") avoids cross-platform Unicode filename-normalization mismatches
+    (macOS tends to store NFD, Windows/Linux NFC - the same character can
+    end up as different bytes on disk) that a raw Hangul filename would
+    risk, and matches the ASCII-only convention every existing romanized
+    piece name (ga.wav, ab.wav) already uses.
+    """
+    if naming == "hangul":
+        return ch
+    return f"{ord(ch):04x}"
+
+
+def all_full_syllables() -> set:
+    """Every composed Hangul syllable - the full-syllable-bank analogue of
+    all_reachable_samples()."""
+    return {chr(c) for c in range(HANGUL_START, HANGUL_END + 1)}
+
+
 def _parse_and_apply_rules(text: str):
     """Decompose `text` into (cho, jung, jong) slots and apply every
     pronunciation rule (local vowel rules, then cross-syllable ones) -
@@ -325,11 +346,21 @@ def _syllable_to_jamo(cho, jung, jong):
 # syllable, or an obstruent coda already fused with its vowel into one
 # recording) are left exactly as before.
 
-def text_to_groups(text: str):
+def text_to_groups(text: str, dedicated_diphthong_check=None, naming: str = "hex-codepoint"):
     """Like text_to_samples, but keeps each character's sample name(s)
     grouped as (kind, [names]) so audio building knows which adjacent
     samples are lobes of the same syllable. A PAUSE is its own ('single',
     [PAUSE]) group. text_to_samples is just this, flattened.
+
+    `dedicated_diphthong_check(name) -> bool` is an optional bank-supplied
+    lookup (see korean_tts.py's "Sound banks" section / synthesize()): for
+    a syllable whose vowel is a compound one (ㅘ/ㅝ/ㅢ/etc, normally split
+    into two crossfaded pieces below), if this returns True for the
+    dedicated fused recording's filename, that one recording is used
+    instead of the usual split - with no coverage requirement, since the
+    check runs per-syllable and falls through to the normal split whenever
+    it returns False. Every existing caller passes None here (the default),
+    which skips this entirely and leaves behavior identical to before.
     """
     groups = []
 
@@ -342,6 +373,26 @@ def text_to_groups(text: str):
         if not isinstance(slot, list):
             pause()
             continue
+
+        if dedicated_diphthong_check is not None and slot[1] in COMPOUND_VOWELS:
+            cho, jung, jong = slot
+            norm_jong = FINAL_MAP.get(jong, jong) if jong in CONSONANTS else jong
+            if norm_jong in SONORANTS:
+                # Sonorant coda: the dedicated recording only covers
+                # onset+vowel-glide (no coda) - the coda is still the usual
+                # shared bare-tail recording, appended as its own piece.
+                name = syllable_filename(_compose(cho, jung, ""), naming)
+                if dedicated_diphthong_check(name):
+                    groups.append(("coda", [name, ROMAN[norm_jong]]))
+                    continue
+            else:
+                # No coda, or an obstruent coda that composes into one
+                # complete, real syllable - one dedicated recording covers
+                # the whole thing.
+                name = syllable_filename(_compose(cho, jung, norm_jong), naming)
+                if dedicated_diphthong_check(name):
+                    groups.append(("single", [name]))
+                    continue
 
         c = _syllable_to_jamo(*slot)
         if any(j not in ROMAN for j in c):
@@ -611,6 +662,88 @@ def overrides_path_for_voice(base_path: str, voice: str) -> str:
     return f"{root}.{voice}{ext}"
 
 
+# ------------------------------------------------------
+# Sound banks (bank.json) - which recording scheme a voice uses
+# ------------------------------------------------------
+#
+# A voice folder can optionally hold a bank.json declaring which assembly
+# strategy its recordings use ("type") and settings for that strategy:
+#
+#   {
+#     "schema_version": 1,
+#     "type": "pieces",             # or "full-syllable"
+#     "display_name": "내레이터 2",  # optional, UI label
+#     "settings": {...},            # type-specific, see build_audio_full_syllable/synthesize
+#     "audio": {...}                # optional per-bank AudioSettings overrides, see below
+#   }
+#
+# A missing, unreadable, or malformed bank.json is always treated as
+# {"type": "pieces", "settings": {}, "audio": {}} - exactly what every voice
+# already was before bank.json existed, so sound/default/ (and any other
+# hand-made voice folder) needs zero changes to keep working.
+
+DEFAULT_BANK_MANIFEST_FILENAME = "bank.json"
+BANK_TYPE_PIECES = "pieces"
+BANK_TYPE_FULL_SYLLABLE = "full-syllable"
+
+_DEFAULT_BANK_MANIFEST = {"schema_version": 1, "type": BANK_TYPE_PIECES, "settings": {}, "audio": {}}
+
+
+class UnsupportedBankTypeError(AudioError):
+    def __init__(self, bank_type):
+        super().__init__(f"알 수 없는 사운드 뱅크 종류: {bank_type}")
+        self.bank_type = bank_type
+
+
+def load_bank_manifest(bank_dir: str) -> dict:
+    """Read bank_dir/bank.json. Always returns a dict with schema_version/
+    type/settings/audio present - a missing, unreadable, or non-dict file
+    resolves to the all-defaults manifest (same defensive philosophy as
+    load_overrides: a typo must never stop playback)."""
+    path = os.path.join(bank_dir, DEFAULT_BANK_MANIFEST_FILENAME)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = None
+    if not isinstance(data, dict):
+        data = {}
+    manifest = dict(_DEFAULT_BANK_MANIFEST)
+    manifest.update(data)
+    manifest.setdefault("settings", {})
+    manifest.setdefault("audio", {})
+    return manifest
+
+
+def save_bank_manifest(bank_dir: str, manifest: dict) -> None:
+    path = os.path.join(bank_dir, DEFAULT_BANK_MANIFEST_FILENAME)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def list_bank_files(bank_dir: str) -> set:
+    """Base names (no extension) of every .wav file directly in bank_dir -
+    the "what's actually recorded" half of a coverage check, shared by
+    tts.py's --check and gui.py's tuning tab instead of each re-scanning
+    the folder inline."""
+    try:
+        return {f[:-4] for f in os.listdir(bank_dir) if f.lower().endswith(".wav")}
+    except OSError:
+        return set()
+
+
+def list_banks(sound_root: str) -> list:
+    """list_voices() plus each voice's parsed bank.json - the richer API
+    bank-type-aware callers (synthesize(), voice_recorder.py) use. Additive:
+    list_voices() itself is unchanged, so every existing caller keeps
+    working exactly as before."""
+    banks = []
+    for name in list_voices(sound_root):
+        bank_dir = voice_dir(sound_root, name)
+        banks.append({"name": name, "dir": bank_dir, "manifest": load_bank_manifest(bank_dir)})
+    return banks
+
+
 def load_overrides(path: str) -> dict:
     """Load per-sample fine-tuning overrides from `path`.
 
@@ -653,9 +786,12 @@ def apply_override(samples: array.array, override: dict) -> array.array:
     return samples
 
 
-def read_sample(path: str, normalize: bool = True, override: dict = None) -> array.array:
+def read_sample(path: str, normalize: bool = True, override: dict = None, audio_settings=None) -> array.array:
     """Load a .wav as mono 16-bit @ TARGET_RATE, trimmed and loudness-matched,
-    then optionally fine-tuned further per `override` (see apply_override)."""
+    then optionally fine-tuned further per `override` (see apply_override).
+    `audio_settings` (an AudioSettings, see below) supplies the trim
+    threshold / loudness targets - defaults to today's global constants."""
+    settings = audio_settings if audio_settings is not None else AudioSettings()
     with wave.open(path, "rb") as w:
         channels = w.getnchannels()
         width = w.getsampwidth()
@@ -678,9 +814,14 @@ def read_sample(path: str, normalize: bool = True, override: dict = None) -> arr
         )
 
     samples = _resample(samples, rate)
-    samples = trim_silence(samples)
+    samples = trim_silence(samples, threshold=settings.silence_threshold)
     if normalize:
-        samples = normalize_loudness(samples)
+        samples = normalize_loudness(
+            samples,
+            target_rms=settings.normalize_target_rms,
+            max_gain=settings.normalize_max_gain,
+            peak_limit=settings.normalize_peak_limit,
+        )
     if override:
         samples = apply_override(samples, override)
     return samples
@@ -730,6 +871,44 @@ STOP_CODA_ENDINGS = ("g", "d", "b")
 DEFAULT_STOP_GAP_MS = 40
 
 
+class AudioSettings:
+    """Resolved audio-assembly constants for one bank. Every field defaults
+    to exactly the module constants above, so AudioSettings() (no args) -
+    what every function below falls back to when a caller doesn't supply
+    one - reproduces today's behavior precisely. A bank's bank.json "audio"
+    block (see resolve_audio_settings) can override any subset of these.
+    """
+
+    _DEFAULTS = {
+        "normalize_target_rms": NORMALIZE_TARGET_RMS,
+        "normalize_max_gain": NORMALIZE_MAX_GAIN,
+        "normalize_peak_limit": NORMALIZE_PEAK_LIMIT,
+        "silence_threshold": SILENCE_THRESHOLD,
+        "crossfade_fraction": CROSSFADE_FRACTION,
+        "crossfade_min_ms": CROSSFADE_MIN_MS,
+        "crossfade_max_ms": CROSSFADE_MAX_MS,
+        "coda_max_ms": CODA_MAX_MS,
+        "coda_tail_fade_ms": CODA_TAIL_FADE_MS,
+        "default_stop_gap_ms": DEFAULT_STOP_GAP_MS,
+    }
+
+    def __init__(self, **overrides):
+        for key, default in self._DEFAULTS.items():
+            if key == "crossfade_fraction" and key in overrides and isinstance(overrides[key], dict):
+                value = {**CROSSFADE_FRACTION, **overrides[key]}
+            else:
+                value = overrides.get(key, default)
+            setattr(self, key, value)
+
+
+def resolve_audio_settings(manifest: dict) -> AudioSettings:
+    """Build an AudioSettings from a bank manifest's "audio" block. Unknown
+    keys in that block are silently ignored (forward compatibility); any
+    field it doesn't mention falls back to today's global constant."""
+    audio = manifest.get("audio") if isinstance(manifest, dict) else None
+    return AudioSettings(**(audio if isinstance(audio, dict) else {}))
+
+
 def _ends_in_stop_coda(name: str) -> bool:
     return bool(name) and name not in CODA_TAILS and name[-1] in STOP_CODA_ENDINGS
 
@@ -748,26 +927,27 @@ def _shorten_coda(samples: array.array, max_ms: int = CODA_MAX_MS, fade_ms: int 
     return cut
 
 
-def _overlap_len(kind: str, len_a: int, len_b: int, override_ms=None) -> int:
+def _overlap_len(kind: str, len_a: int, len_b: int, override_ms=None, audio_settings=None) -> int:
+    settings = audio_settings if audio_settings is not None else AudioSettings()
     shorter = min(len_a, len_b)
     if not len_a or not len_b:
         return 0
     if override_ms is not None:
         ov = int(TARGET_RATE * override_ms / 1000)
         return max(0, min(ov, shorter - 1))
-    fraction = CROSSFADE_FRACTION.get(kind, 0.0)
+    fraction = settings.crossfade_fraction.get(kind, 0.0)
     if fraction <= 0:
         return 0
-    lo = int(TARGET_RATE * CROSSFADE_MIN_MS / 1000)
-    hi = int(TARGET_RATE * CROSSFADE_MAX_MS / 1000)
+    lo = int(TARGET_RATE * settings.crossfade_min_ms / 1000)
+    hi = int(TARGET_RATE * settings.crossfade_max_ms / 1000)
     ov = int(shorter * fraction)
-    ov = max(lo, ov)           # at least CROSSFADE_MIN_MS, if the clip allows
-    ov = min(ov, hi)           # but no more than CROSSFADE_MAX_MS
+    ov = max(lo, ov)           # at least crossfade_min_ms, if the clip allows
+    ov = min(ov, hi)           # but no more than crossfade_max_ms
     ov = min(ov, shorter - 1)  # and never the entire shorter clip
     return max(0, ov)
 
 
-def _crossfade_join(chunks, kind: str, names=None, overrides=None) -> array.array:
+def _crossfade_join(chunks, kind: str, names=None, overrides=None, audio_settings=None) -> array.array:
     """Overlap-add adjacent chunks with an equal-power crossfade instead of
     concatenating them whole, so the combined clip is shorter than the sum
     of its parts and the join sounds like one continuous sound, not two
@@ -787,7 +967,7 @@ def _crossfade_join(chunks, kind: str, names=None, overrides=None) -> array.arra
             override_ms = overrides.get(names[i], {}).get("crossfade_ms")
             if override_ms is None:
                 override_ms = overrides.get(names[i - 1], {}).get("crossfade_ms")
-        ov = _overlap_len(kind, len(chunks[i - 1]), len(nxt), override_ms)
+        ov = _overlap_len(kind, len(chunks[i - 1]), len(nxt), override_ms, audio_settings=audio_settings)
         ov = min(ov, len(result), len(nxt))
         if ov <= 0:
             result.extend(nxt)
@@ -804,7 +984,7 @@ def _crossfade_join(chunks, kind: str, names=None, overrides=None) -> array.arra
 
 
 def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossfade=True, speed=1.0,
-                 stop_gap_ms=DEFAULT_STOP_GAP_MS, overrides=None):
+                 stop_gap_ms=DEFAULT_STOP_GAP_MS, overrides=None, audio_settings=None):
     """Concatenate grouped samples (from text_to_groups) into one mono track.
 
     Each group's samples are crossfaded together (see _crossfade_join) rather
@@ -832,6 +1012,7 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
     (as text_to_samples returns): each name is then treated as its own
     'single' group, with no crossfading.
     """
+    settings = audio_settings if audio_settings is not None else AudioSettings()
     track = array.array("h")
     gap = array.array("h", bytes(int(TARGET_RATE * gap_ms / 1000) * SAMPLE_WIDTH))
     stop_gap = array.array("h", bytes(int(TARGET_RATE * stop_gap_ms / 1000) * SAMPLE_WIDTH))
@@ -849,7 +1030,7 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
         if name not in raw_cache:
             path = os.path.join(sound_dir, name + ".wav")
             raw_cache[name] = (
-                read_sample(path, normalize=normalize, override=overrides.get(name))
+                read_sample(path, normalize=normalize, override=overrides.get(name), audio_settings=settings)
                 if os.path.exists(path) else None
             )
         return raw_cache[name]
@@ -872,13 +1053,17 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
                 continue
             chunk = array.array("h", raw)  # copy: about to be mutated
             if i > 0 and name in CODA_TAILS:  # a batchim, not this syllable's onset
-                coda_max_ms = overrides.get(name, {}).get("coda_max_ms", CODA_MAX_MS)
-                chunk = _shorten_coda(chunk, max_ms=coda_max_ms)
+                coda_max_ms = overrides.get(name, {}).get("coda_max_ms", settings.coda_max_ms)
+                chunk = _shorten_coda(chunk, max_ms=coda_max_ms, fade_ms=settings.coda_tail_fade_ms)
             chunks.append(chunk)
         if not chunks:
             continue
 
-        combined = _crossfade_join(chunks, kind, names, overrides) if crossfade and len(chunks) > 1 else chunks[0]
+        combined = (
+            _crossfade_join(chunks, kind, names, overrides, audio_settings=settings)
+            if crossfade and len(chunks) > 1
+            else chunks[0]
+        )
         if len(chunks) > 1 and not crossfade:
             for extra in chunks[1:]:
                 combined.extend(extra)
@@ -892,6 +1077,138 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
     if speed != 1.0:
         track = change_speed(track, speed)
     return track, missing
+
+
+def build_audio_full_syllable(
+    text, sound_dir, fallback_dir=None, fallback_manifest=None,
+    gap_ms=300, fade_ms=5, normalize=True, speed=1.0, stop_gap_ms=None,
+    audio_settings=None, naming="hex-codepoint",
+):
+    """Assemble `text` from one whole-syllable recording per character - the
+    "full-syllable" bank type's builder, an alternative to build_audio's
+    piece-assembly scheme (no crossfade/coda-shortening needed since each
+    recording is already a complete, continuous sound).
+
+    Liaison/assimilation still has to run first (_parse_and_apply_rules,
+    the same step text_to_pronunciation uses) so the CORRECTED syllable is
+    looked up — e.g. 옷이 looks up 오 then 시, not 옷 then 이 — followed by
+    the same batchim neutralisation text_to_pronunciation applies (밖 -> 박)
+    so the filename matches what's actually pronounced.
+
+    If a syllable isn't recorded in `sound_dir` and `fallback_dir` is given,
+    that one character is synthesized via the fallback bank's own
+    (piece-based) build_audio instead of being dropped. Returns
+    (samples, missing, fallback_used): `missing` lists characters found
+    nowhere (this bank or its fallback), `fallback_used` lists characters
+    served via the fallback rather than a dedicated recording of this bank's
+    own — a fully separate list from `missing`, not a subset of it.
+    """
+    settings = audio_settings if audio_settings is not None else AudioSettings()
+    stop_gap_ms = settings.default_stop_gap_ms if stop_gap_ms is None else stop_gap_ms
+    fallback_settings = resolve_audio_settings(fallback_manifest) if fallback_manifest else AudioSettings()
+
+    track = array.array("h")
+    gap = array.array("h", bytes(int(TARGET_RATE * gap_ms / 1000) * SAMPLE_WIDTH))
+    stop_gap = array.array("h", bytes(int(TARGET_RATE * stop_gap_ms / 1000) * SAMPLE_WIDTH))
+    fade_len = int(TARGET_RATE * fade_ms / 1000)
+    missing = []
+    fallback_used = []
+    prev_ends_in_stop = False
+    pending_pause = False
+
+    for slot in _parse_and_apply_rules(text):
+        if not isinstance(slot, list):
+            if not pending_pause:
+                track.extend(gap)
+                prev_ends_in_stop = False
+                pending_pause = True
+            continue
+        pending_pause = False
+
+        cho, jung, jong = slot
+        norm_jong = FINAL_MAP.get(jong, jong) if jong in CONSONANTS else jong
+        ch = _compose(cho, jung, norm_jong)
+        name = syllable_filename(ch, naming)
+        path = os.path.join(sound_dir, name + ".wav")
+
+        if os.path.exists(path):
+            samples = read_sample(path, normalize=normalize, audio_settings=settings)
+        elif fallback_dir is not None:
+            sub_groups = text_to_groups(ch)
+            sub_track, sub_missing = build_audio(
+                sub_groups, fallback_dir, gap_ms=0, fade_ms=fade_ms,
+                normalize=normalize, audio_settings=fallback_settings,
+            )
+            if sub_missing or not len(sub_track):
+                missing.append(ch)
+                samples = None
+            else:
+                samples = sub_track
+                fallback_used.append(ch)
+        else:
+            missing.append(ch)
+            samples = None
+
+        if samples is not None and len(samples):
+            if prev_ends_in_stop and stop_gap_ms:
+                track.extend(stop_gap)
+            chunk = array.array("h", samples)
+            if fade_len:
+                _apply_fade(chunk, fade_len)
+            track.extend(chunk)
+            prev_ends_in_stop = norm_jong in {"ㄱ", "ㄷ", "ㅂ"}
+        else:
+            prev_ends_in_stop = False
+
+    if speed != 1.0:
+        track = change_speed(track, speed)
+    return track, missing, fallback_used
+
+
+def synthesize(text, sound_root, voice, **kwargs):
+    """Bank-type-aware entry point: resolves `voice`'s bank.json and routes
+    to the matching assembly strategy. Prefer this over manually chaining
+    text_to_groups()+build_audio() so new bank types keep working without
+    every caller needing its own type dispatch. Returns (samples, missing),
+    same shape as build_audio - if the bank is "full-syllable", its
+    fallback_used list (see build_audio_full_syllable) isn't part of this
+    return value; call build_audio_full_syllable directly if you need it.
+
+    Raises UnsupportedBankTypeError for any type this function doesn't
+    recognize - deliberately not silently treated as "pieces", since a
+    bank of some future type likely doesn't have flat <name>.wav pieces to
+    fall back to at all.
+    """
+    bank_dir = voice_dir(sound_root, voice)
+    manifest = load_bank_manifest(bank_dir)
+    bank_type = manifest.get("type", BANK_TYPE_PIECES)
+    settings_block = manifest.get("settings") or {}
+    audio_settings = resolve_audio_settings(manifest)
+    kwargs.setdefault("stop_gap_ms", audio_settings.default_stop_gap_ms)
+
+    if bank_type == BANK_TYPE_PIECES:
+        naming = settings_block.get("naming", "hex-codepoint")
+        check_fn = None
+        if settings_block.get("dedicated_diphthongs"):
+            def check_fn(name, _dir=bank_dir):
+                return os.path.exists(os.path.join(_dir, name + ".wav"))
+        groups = text_to_groups(text, dedicated_diphthong_check=check_fn, naming=naming)
+        return build_audio(groups, bank_dir, audio_settings=audio_settings, **kwargs)
+
+    if bank_type == BANK_TYPE_FULL_SYLLABLE:
+        fallback_name = settings_block.get("fallback_bank")
+        fallback_dir = voice_dir(sound_root, fallback_name) if fallback_name else None
+        fallback_manifest = load_bank_manifest(fallback_dir) if fallback_dir else None
+        naming = settings_block.get("naming", "hex-codepoint")
+        kwargs.pop("crossfade", None)
+        kwargs.pop("overrides", None)
+        samples, missing, _fallback_used = build_audio_full_syllable(
+            text, bank_dir, fallback_dir=fallback_dir, fallback_manifest=fallback_manifest,
+            audio_settings=audio_settings, naming=naming, **kwargs,
+        )
+        return samples, missing
+
+    raise UnsupportedBankTypeError(bank_type)
 
 
 def to_wav_bytes(samples: array.array) -> bytes:

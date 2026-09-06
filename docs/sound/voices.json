@@ -1,6 +1,6 @@
 {
   "voices": [
-    "default"
+    {"name": "default", "type": "pieces"}
 
   ]
 }
