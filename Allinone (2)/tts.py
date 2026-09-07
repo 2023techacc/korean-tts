@@ -235,7 +235,7 @@ def check(args):
 
     if bank_settings.get("dedicated_diphthongs"):
         cv_names = {ktts.syllable_filename(ch, naming) for ch in ktts.all_diphone_cv_blocks(phonology)}
-        tail_names = {ktts.syllable_filename(ch, naming) for ch in ktts.all_diphone_coda_tails()}
+        tail_names = {ktts.syllable_filename(ch, naming) for ch in ktts.all_diphone_coda_tails(phonology)}
         needed_total |= cv_names | tail_names
         info(f"\n[온셋+중성 · 중성+받침] 온셋+중성 보유 {len(cv_names & have)}/{len(cv_names)}개, "
              f"중성+받침 보유 {len(tail_names & have)}/{len(tail_names)}개")

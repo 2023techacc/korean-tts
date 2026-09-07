@@ -53,6 +53,17 @@ COMPOUND_VOWELS = {"ㅘ": "ㅗㅏ", "ㅙ": "ㅗㅐ", "ㅚ": "ㅗㅐ", "ㅝ": "�
 # _syllable_to_jamo) are ㅗ+ㅣ and ㅜ+ㅔ respectively; ㅙ's default split IS
 # already its real one, so it needs no special-casing either way.
 COMPOUND_VOWELS_OE_DISTINCT = {"ㅚ": "ㅗㅣ", "ㅞ": "ㅜㅔ"}
+# Same ㅚ/ㅙ/ㅞ merge as above, but at the JUNG level - used by the hex-named
+# tiers (dedicated_diphthongs' CV-blocks/coda-tails, syllable_overrides'
+# exact syllables), which look up a real composed codepoint rather than a
+# phonology-aware ROMAN split. Without this, those tiers would always
+# require ㅚ/웨 recorded separately from 왜 (three near-identical takes),
+# since composing straight from the parsed jung never merges anything on
+# its own - unlike _syllable_to_jamo's COMPOUND_VOWELS lookup, which already
+# merges by construction. Deliberately NOT folded into
+# _apply_local_vowel_rules: that function also feeds text_to_pronunciation,
+# which must keep showing 외 as 외, not silently rewrite it to 왜.
+OE_WAE_MERGE = {"ㅚ": "ㅙ", "ㅞ": "ㅙ"}
 VOWEL_MERGE = {"ㅔ": "ㅐ", "ㅖ": "ㅒ"}
 ROMAN = {
     "ㅏ": "a", "ㅓ": "eo", "ㅐ": "ae", "ㅔ": "e", "ㅡ": "eu", "ㅣ": "i", "ㅗ": "o", "ㅜ": "u",
@@ -173,9 +184,12 @@ class PhonologyOptions:
       merge step at all (they look up whole composed syllables, never
       touching VOWEL_MERGE), so this only affects text_to_groups's split.
     - distinguish_oe_wae: ㅚ/ㅙ/ㅞ are pronounced almost identically in
-      casual modern Korean, so all three default to ㅙ's split (ㅗ+ㅐ) -
+      casual modern Korean, so all three default to ㅙ's recording/split -
       this restores ㅚ and ㅞ's own real orthographic splits (ㅗ+ㅣ and
-      ㅜ+ㅔ) instead. Pieces-only, same reasoning as distinguish_ae_e.
+      ㅜ+ㅔ, see COMPOUND_VOWELS_OE_DISTINCT) for the pieces tier, and their
+      own separately-recordable codepoints (see OE_WAE_MERGE) for the
+      dedicated_diphthongs/syllable_overrides tiers. Affects every tier,
+      unlike distinguish_ae_e.
     """
 
     _DEFAULTS = {
@@ -334,28 +348,56 @@ def all_full_syllables() -> set:
     return {chr(c) for c in range(HANGUL_START, HANGUL_END + 1)}
 
 
+def _hex_tier_jung_candidates(jung: str, phonology) -> tuple:
+    """Jungs a hex-named tier (dedicated_diphthongs/syllable_overrides)
+    should try composing with, in order: `jung` itself first, then (unless
+    distinguish_oe_wae is on) its OE_WAE_MERGE canonical form (ㅚ/ㅞ -> ㅙ)
+    as a fallback. Exact-first matters for backward compatibility: a bank
+    recorded before this fallback existed (or with distinguish_oe_wae on)
+    may already have ㅚ/ㅞ's OWN dedicated recording, which must keep being
+    used instead of silently rerouting to ㅙ's just because the checkbox is
+    off. A bank that only recorded the merged form still resolves
+    correctly, since the exact-jung candidate's file won't exist and the
+    caller falls through to the next candidate."""
+    if phonology.distinguish_oe_wae or jung not in OE_WAE_MERGE:
+        return (jung,)
+    return (jung, OE_WAE_MERGE[jung])
+
+
+def _hex_tier_jung(jung: str, phonology) -> str:
+    """The single canonical jung a hex-named tier's REQUIRED recording set
+    (all_reachable_full_syllables/all_diphone_cv_blocks - what the recorder
+    asks for) should count under: merges ㅚ/ㅞ into ㅙ unless
+    distinguish_oe_wae is on. Just the last (most-canonical) candidate from
+    _hex_tier_jung_candidates - see that function for why lookup itself
+    needs the full candidate list instead of jumping straight here."""
+    return _hex_tier_jung_candidates(jung, phonology)[-1]
+
+
 def all_reachable_full_syllables(phonology=None) -> set:
     """The subset of all_full_syllables() actually reachable through
-    _apply_local_vowel_rules + FINAL_MAP neutralization before a
-    full-syllable/diphone lookup happens - analogous to how
+    _apply_local_vowel_rules + FINAL_MAP neutralization + OE_WAE_MERGE
+    before a syllable_overrides lookup happens - analogous to how
     all_reachable_samples() is the reachable subset of the pieces type's
-    raw sample-name space. By default: 363 distinct (cho,jung) pairs (of
-    399 raw) x 8 surface finals (no-coda + the 7 audible finals) = 2,904
-    syllables (~26% of the raw 11,172) - palatal-onset yotized vowels
-    (쟈/져/쳐 collapse to 자/저/처, unless distinguish_palatal_glide) and
-    non-'ㅇ'-onset ㅢ (희->히, unless preserve_consonant_ui) never survive
-    to reach a filename otherwise. Both collapses restore exactly 18 of
-    the 36 collapsed (cho,jung) pairs each, so either flag alone gives the
-    same count: 381x8=3,048. Both together restore all 36 -> 399x8=3,192
-    (every raw pair, nothing left to collapse). Counts verified by running
-    this exact logic against the real tables, not computed by hand."""
+    raw sample-name space. By default: 325 distinct (cho,jung) pairs x 8
+    surface finals (no-coda + the 7 audible finals) = 2,600 syllables -
+    palatal-onset yotized vowels (쟈/져/쳐 collapse to 자/저/처, unless
+    distinguish_palatal_glide), non-'ㅇ'-onset ㅢ (희->히, unless
+    preserve_consonant_ui), and ㅚ/ㅞ (merge into ㅙ, unless
+    distinguish_oe_wae) never survive to reach a filename otherwise. With
+    distinguish_oe_wae on (merge lifted, ㅚ/ㅞ own splits restored to their
+    own codepoints): 363x8=2,904 - the count this function always returned
+    before that setting existed. Every flag on: 399x8=3,192 (every raw
+    (cho,jung) pair, nothing left to collapse or merge). Counts verified by
+    running this exact logic against the real tables, not computed by
+    hand."""
     phonology = phonology if phonology is not None else PhonologyOptions()
     reachable = set()
     for cho in CHOSEONG:
         for jung in JUNGSEONG:
             slot = [cho, jung, ""]
             _apply_local_vowel_rules([slot], phonology)
-            norm_jung = slot[1]
+            norm_jung = _hex_tier_jung(slot[1], phonology)
             for jong in JONGSEONG:
                 norm_jong = FINAL_MAP.get(jong, jong) if jong else ""
                 reachable.add(_compose(cho, norm_jung, norm_jong))
@@ -364,28 +406,35 @@ def all_reachable_full_syllables(phonology=None) -> set:
 
 def all_diphone_cv_blocks(phonology=None) -> set:
     """One recording per reachable (onset, nucleus) pair, composed with no
-    coda (jong="") - the "diphone" bank type's onset+vowel half. Same
-    reachable-pair definition and count as all_reachable_full_syllables()."""
+    coda (jong="") - dedicated_diphthongs' onset+vowel half. Same
+    reachable-pair definition and count as all_reachable_full_syllables()
+    (325 by default, 363 with distinguish_oe_wae)."""
     phonology = phonology if phonology is not None else PhonologyOptions()
     blocks = set()
     for cho in CHOSEONG:
         for jung in JUNGSEONG:
             slot = [cho, jung, ""]
             _apply_local_vowel_rules([slot], phonology)
-            blocks.add(_compose(cho, slot[1], ""))
+            blocks.add(_compose(cho, _hex_tier_jung(slot[1], phonology), ""))
     return blocks
 
 
-def all_diphone_coda_tails() -> set:
+def all_diphone_coda_tails(phonology=None) -> set:
     """One recording per (nucleus, coda) pair, composed with a null onset
-    (ㅇ) - the "diphone" bank type's nucleus+coda half. A null-onset
-    syllable genuinely IS what a bare nucleus+coda sounds like (the same
-    principle sound/default/'s existing "ab.wav"-style pieces already use).
-    Unaffected by any PhonologyOptions field: a fixed cho="ㅇ" is already
-    exempt from every local vowel collapse rule, so all 21 nuclei are
-    always reachable here. 21 nuclei x 7 audible finals = 147."""
+    (ㅇ) - dedicated_diphthongs' nucleus+coda half. A null-onset syllable
+    genuinely IS what a bare nucleus+coda sounds like (the same principle
+    sound/default/'s existing "ab.wav"-style pieces already use). A fixed
+    cho="ㅇ" is already exempt from every local vowel collapse rule, so the
+    only PhonologyOptions field that affects this is distinguish_oe_wae:
+    off (default) skips ㅚ/ㅞ entirely (their CV-blocks already compose
+    with ㅙ's codepoint via _hex_tier_jung, so a same-vowel coda-tail join
+    only ever needs ㅙ's tail) - 19 nuclei x 7 audible finals = 133. On:
+    all 21 nuclei x 7 = 147."""
+    phonology = phonology if phonology is not None else PhonologyOptions()
     tails = set()
     for jung in JUNGSEONG:
+        if not phonology.distinguish_oe_wae and jung in OE_WAE_MERGE:
+            continue
         for jong in JONGSEONG:
             if not jong:
                 continue
@@ -433,10 +482,13 @@ def _syllable_to_jamo(cho, jung, jong, phonology=None):
     default split (both ㅗㅐ, identical to ㅙ's) for their real orthographic
     ones (ㅗㅣ and ㅜㅔ respectively) - ㅙ's default split IS already its
     real one, so it's unaffected either way. `phonology.distinguish_ae_e`
-    skips merging a resulting ㅔ/ㅖ into ㅐ/ㅒ. Both pieces-only distinctions
-    - full-syllable/diphone never call this (they look up whole composed
-    syllables directly, so ㅐ/ㅔ and ㅚ/ㅙ/ㅞ are already naturally distinct
-    for them)."""
+    skips merging a resulting ㅔ/ㅖ into ㅐ/ㅒ. This function is only ever
+    called for the pieces (romanized-name) tier - the hex-named tiers
+    (dedicated_diphthongs/syllable_overrides) look up whole composed
+    syllables directly instead, applying their own equivalent merge via
+    OE_WAE_MERGE/_hex_tier_jung in text_to_groups (distinguish_ae_e has no
+    hex-tier equivalent: ㅐ/ㅔ are already naturally distinct codepoints,
+    nothing to merge)."""
     phonology = phonology if phonology is not None else PhonologyOptions()
     a = [cho, jung] + ([jong] if jong else [])
     if a[-1] in CONSONANTS:
@@ -527,6 +579,7 @@ def text_to_groups(text: str, dedicated_diphthong_check=None, syllable_override_
     should pass a real existence check here so dedicated_diphthongs keeps
     working exactly as before.
     """
+    phonology = phonology if phonology is not None else PhonologyOptions()
     groups = []
 
     def pause():
@@ -542,20 +595,30 @@ def text_to_groups(text: str, dedicated_diphthong_check=None, syllable_override_
         if syllable_override_check is not None:
             cho, jung, jong = slot
             norm_jong = FINAL_MAP.get(jong, jong) if jong in CONSONANTS else jong
-            name = syllable_filename(_compose(cho, jung, norm_jong), naming)
-            if syllable_override_check(name):
-                groups.append(("single", [name]))
+            found_name = None
+            for cand_jung in _hex_tier_jung_candidates(jung, phonology):
+                cand_name = syllable_filename(_compose(cho, cand_jung, norm_jong), naming)
+                if syllable_override_check(cand_name):
+                    found_name = cand_name
+                    break
+            if found_name is not None:
+                groups.append(("single", [found_name]))
                 continue
 
         if dedicated_diphthong_check is not None:
             cho, jung, jong = slot
             norm_jong = FINAL_MAP.get(jong, jong) if jong in CONSONANTS else jong
-            cv_name = syllable_filename(_compose(cho, jung, ""), naming)
-            if dedicated_diphthong_check(cv_name):
+            cv_name, cv_jung = None, jung
+            for cand_jung in _hex_tier_jung_candidates(jung, phonology):
+                cand_name = syllable_filename(_compose(cho, cand_jung, ""), naming)
+                if dedicated_diphthong_check(cand_name):
+                    cv_name, cv_jung = cand_name, cand_jung
+                    break
+            if cv_name is not None:
                 if not norm_jong:
                     groups.append(("single", [cv_name]))
                     continue
-                tail_name = syllable_filename(_compose("ㅇ", jung, norm_jong), naming)
+                tail_name = syllable_filename(_compose("ㅇ", cv_jung, norm_jong), naming)
                 if dedicated_diphthong_check(tail_name):
                     groups.append(("diphone", [cv_name, tail_name]))
                     continue

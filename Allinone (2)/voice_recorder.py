@@ -125,7 +125,7 @@ def _cv_and_tail_names(settings: dict) -> list:
     naming = settings.get("naming", "hex-codepoint")
     phonology = ktts.resolve_phonology_options(settings)
     cv_names = sorted(_hex_filter(ktts.all_diphone_cv_blocks(phonology), naming).values())
-    tail_names = sorted(_hex_filter(ktts.all_diphone_coda_tails(), naming).values())
+    tail_names = sorted(_hex_filter(ktts.all_diphone_coda_tails(phonology), naming).values())
     return cv_names + tail_names
 
 
@@ -133,7 +133,7 @@ def _cv_and_tail_prompts(settings: dict) -> dict:
     naming = settings.get("naming", "hex-codepoint")
     phonology = ktts.resolve_phonology_options(settings)
     by_char = _hex_filter(ktts.all_diphone_cv_blocks(phonology), naming)
-    by_char.update(_hex_filter(ktts.all_diphone_coda_tails(), naming))
+    by_char.update(_hex_filter(ktts.all_diphone_coda_tails(phonology), naming))
     return {name: ch for ch, name in by_char.items()}
 
 
