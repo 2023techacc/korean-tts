@@ -82,6 +82,13 @@ for (const [input, key, transform] of [
 // default".
 const KNOWN_BANK_TYPES = ["pieces"];
 
+// name -> whether that voice's base pieces are hex-named (see korean_tts.py's
+// piece_filename/PIECE_REPRESENTATIVE_CHARS) - populated from voices.json's
+// per-voice "hex_pieces" field (written by sync-sound-assets.bat) so build()
+// can pass the right hexPieces option to buildAudio() without a separate
+// bank.json fetch per voice.
+const voiceHexPieces = new Map();
+
 async function initVoices() {
   let voices = [DEFAULT_VOICE];
   try {
@@ -93,6 +100,9 @@ async function initVoices() {
           .filter((v) => typeof v === "string" || KNOWN_BANK_TYPES.includes(v.type))
           .map((v) => (typeof v === "string" ? v : v.name));
         if (names.length) voices = names;
+        for (const v of data.voices) {
+          if (typeof v !== "string" && v.hex_pieces) voiceHexPieces.set(v.name, true);
+        }
       }
     }
   } catch {
@@ -151,6 +161,7 @@ async function build() {
     gapMs: settings.gapMs,
     stopGapMs: settings.stopGapMs,
     speed: settings.speed,
+    hexPieces: voiceHexPieces.get(settings.voice) === true,
   });
 }
 

@@ -48,48 +48,22 @@ else:
 SOUND_ROOT = os.path.join(WRITABLE_DIR, "sound")
 
 
-def _compose(cho: str, jung: str, jong: str) -> str:
-    return chr(0xAC00 + (ktts.CHO_INDEX[cho] * 21 + ktts.JUNG_INDEX[jung]) * 28 + ktts.JONG_INDEX[jong])
-
-
 def build_prompt_map() -> dict:
     """sample name -> a real Hangul character that, said aloud, produces
     exactly that recording. Covers every name all_reachable_samples() can
     return (verified: build_prompt_map's keys are a superset, with 0 gaps).
-
-    Two pieces make up almost every name: an onset+vowel ("ga") or a
-    silent-onset vowel(+stop-coda) ("ag") - each has a natural single
-    Hangul character that IS exactly that recording (가, 악). The four bare
-    sonorant-coda tails (n/l/m/ng) are the one exception: the library
-    records those as a mini-syllable with ㅡ (느/르/므/응), matching the
-    convention already baked into CODA_MAX_MS/CODA_TAIL_FADE_MS's tuning -
-    so a new voice's recordings behave the same way under the same timing
-    constants.
-    """
-    examples = {}
-    simple_vowels = [v for v in ktts.JUNGSEONG if v in ktts.ROMAN]
-
-    for cho in ktts.CHOSEONG:
-        for jung in simple_vowels:
-            name = ktts.ROMAN[cho] + ktts.ROMAN[jung]
-            examples.setdefault(name, _compose(cho, jung, ""))
-
-    stop_jong = [j for j in ktts.JONGSEONG if j in ("ㄱ", "ㄷ", "ㅂ")]
-    for jung in simple_vowels:
-        examples.setdefault(ktts.ROMAN[jung], _compose("ㅇ", jung, ""))
-        for jong in stop_jong:
-            name = ktts.ROMAN[jung] + ktts.ROMAN[jong]
-            examples.setdefault(name, _compose("ㅇ", jung, jong))
-
-    examples["n"] = "느"
-    examples["l"] = "르"
-    examples["m"] = "므"
-    examples["ng"] = "응"
-    return examples
+    Just korean_tts.PIECE_REPRESENTATIVE_CHARS - the engine needs this same
+    table too now (see korean_tts.piece_filename/hex_pieces), so it lives
+    there as the single source of truth; kept as a function here since
+    that's the name every caller in this file already uses."""
+    return dict(ktts.PIECE_REPRESENTATIVE_CHARS)
 
 
 def _pieces_names(settings: dict) -> list:
-    return sorted(ktts.all_reachable_samples(ktts.resolve_phonology_options(settings)))
+    hex_pieces = bool(settings.get("hex_pieces"))
+    naming = settings.get("naming", "hex-codepoint")
+    names = ktts.all_reachable_samples(ktts.resolve_phonology_options(settings))
+    return sorted({ktts.piece_filename(n, hex_pieces, naming) for n in names})
 
 
 def _pieces_prompts(settings: dict) -> dict:
@@ -97,8 +71,12 @@ def _pieces_prompts(settings: dict) -> dict:
     # onset x every ROMAN-covered vowel), independent of `settings` - it's
     # already a strict superset of every PhonologyOptions combination's
     # reachable-name set (verified: zero gaps for every field on its own or
-    # combined), so no phonology-aware branching is needed here at all.
-    return build_prompt_map()
+    # combined), so no phonology-aware branching is needed here at all
+    # beyond translating each key the same way _pieces_names() does, so
+    # prompts stay keyed by whatever _pieces_names() actually returns.
+    hex_pieces = bool(settings.get("hex_pieces"))
+    naming = settings.get("naming", "hex-codepoint")
+    return {ktts.piece_filename(name, hex_pieces, naming): ch for name, ch in build_prompt_map().items()}
 
 
 def _hex_filter(chars: set, naming: str) -> dict:
@@ -219,6 +197,7 @@ SETTING_OPTIONS = [
     {"key": "distinguish_oe_wae", "label": "ㅚ/ㅙ/ㅞ 구분", "counts": True},
     {"key": "dedicated_diphthongs", "label": "온셋+중성 · 중성+받침 조각 별도 녹음", "counts": True},
     {"key": "syllable_overrides", "label": "특정 음절 통째로 녹음", "counts": True},
+    {"key": "hex_pieces", "label": "기본 조각도 hex 이름으로 저장 (일관된 이름 규칙)", "counts": False},
 ]
 # One-shot preset buttons (see App._apply_preset): each just sets these two
 # tier checkboxes to a good starting combination, matching the old type's
@@ -458,9 +437,10 @@ class App(tk.Tk):
             row_frame.pack(fill="x", pady=1, anchor="w")
             ttk.Checkbutton(row_frame, text=opt["label"], variable=self.setting_vars[opt["key"]],
                              command=self._refresh_settings_panel).pack(side="left")
-            count_label = ttk.Label(row_frame, text="", foreground="#888")
-            count_label.pack(side="left", padx=6)
-            self.setting_count_labels[opt["key"]] = count_label
+            if opt.get("counts", True):
+                count_label = ttk.Label(row_frame, text="", foreground="#888")
+                count_label.pack(side="left", padx=6)
+                self.setting_count_labels[opt["key"]] = count_label
 
         self.total_count_label = ttk.Label(self.new_bank_frame, text="", font=("", 10, "bold"))
         self.total_count_label.pack(anchor="w", padx=8, pady=(4, 4))
@@ -633,6 +613,8 @@ class App(tk.Tk):
         self.total_count_label.config(text=f"필요 녹음 수: {required_count(current_settings)}개")
 
         for opt in SETTING_OPTIONS:
+            if not opt.get("counts", True):
+                continue
             hypothetical = dict(current_settings)
             hypothetical[opt["key"]] = True
             count_label = self.setting_count_labels[opt["key"]]
@@ -666,6 +648,22 @@ class App(tk.Tk):
         # from what synthesize() actually does with that same bank.
         settings = ktts._migrate_legacy_type(manifest)
         self.names, self.prompts = build_walkthrough(settings)
+
+        if settings.get("dedicated_diphthongs"):
+            # A bare sonorant-tail piece (n/l/m/ng) this bank's OWN CV-
+            # block+coda-tail coverage already makes provably unreachable
+            # (see korean_tts.unreachable_bare_tails) isn't actually
+            # needed - drop it from the walkthrough so a bank like this
+            # doesn't sit at "not quite done" forever over a piece its own
+            # cascade can never call on.
+            have = ktts.list_bank_files(self.voice_dir)
+            phonology = ktts.resolve_phonology_options(settings)
+            naming = settings.get("naming", "hex-codepoint")
+            hex_pieces = bool(settings.get("hex_pieces"))
+            unreachable = ktts.unreachable_bare_tails(have, phonology, naming, hex_pieces)
+            if unreachable:
+                self.names = [n for n in self.names if n not in unreachable]
+                self.prompts = {n: p for n, p in self.prompts.items() if n not in unreachable}
 
         labels = ["조각"]
         if settings.get("dedicated_diphthongs"):

@@ -67,6 +67,105 @@ object AudioEngine {
     private fun endsInStopCoda(name: String): Boolean =
         name.isNotEmpty() && name !in CODA_TAILS && name.last() in STOP_CODA_ENDINGS
 
+    // Every romanized base piece name -> the hex codepoint of a real
+    // character that produces exactly that recording (e.g. "ga" -> "ac00"
+    // == 가), used only when a bank's bank.json sets "hex_pieces": true (see
+    // pieceFilename below). Generated from korean_tts.py's
+    // PIECE_REPRESENTATIVE_CHARS - a fixed, verified table, not re-derived
+    // here, so there's no risk of the two ports drifting apart. "n"/"l"/
+    // "m"/"ng" get a "_tail" suffix: those four are recorded SEPARATELY
+    // from the ordinary onset+vowel piece that happens to share the same
+    // representative character (e.g. "n"'s 느 is also "neu"'s 느, but as a
+    // trimmed coda-closure take, not the same file) - without the suffix,
+    // hex-naming would silently collapse them onto one file.
+    private val PIECE_HEX_NAMES: Map<String, String> = mapOf(
+        "a" to "c544", "ab" to "c555", "ad" to "c54b", "ae" to "c560",
+        "aeb" to "c571", "aed" to "c567", "aeg" to "c561", "ag" to "c545",
+        "ba" to "bc14", "bae" to "bc30", "bba" to "be60", "bbae" to "be7c",
+        "bbeo" to "bed0", "bbeu" to "c058", "bbi" to "c090", "bbo" to "bf40",
+        "bbu" to "bfcc", "bbya" to "be98", "bbyae" to "beb4", "bbyeo" to "bf08",
+        "bbyo" to "bfb0", "bbyu" to "c03c", "beo" to "bc84", "beu" to "be0c",
+        "bi" to "be44", "bo" to "bcf4", "bu" to "bd80", "bya" to "bc4c",
+        "byae" to "bc68", "byeo" to "bcbc", "byo" to "bd64", "byu" to "bdf0",
+        "cha" to "cc28", "chae" to "cc44", "cheo" to "cc98", "cheu" to "ce20",
+        "chi" to "ce58", "cho" to "cd08", "chu" to "cd94", "da" to "b2e4",
+        "dae" to "b300", "dda" to "b530", "ddae" to "b54c", "ddeo" to "b5a0",
+        "ddeu" to "b728", "ddi" to "b760", "ddo" to "b610", "ddu" to "b69c",
+        "ddya" to "b568", "ddyae" to "b584", "ddyeo" to "b5d8", "ddyo" to "b680",
+        "ddyu" to "b70c", "deo" to "b354", "deu" to "b4dc", "di" to "b514",
+        "do" to "b3c4", "du" to "b450", "dya" to "b31c", "dyae" to "b338",
+        "dyeo" to "b38c", "dyo" to "b434", "dyu" to "b4c0", "eo" to "c5b4",
+        "eob" to "c5c5", "eod" to "c5bb", "eog" to "c5b5", "eu" to "c73c",
+        "eub" to "c74d", "eud" to "c743", "eug" to "c73d", "ga" to "ac00",
+        "gae" to "ac1c", "geo" to "ac70", "geu" to "adf8", "gga" to "ae4c",
+        "ggae" to "ae68", "ggeo" to "aebc", "ggeu" to "b044", "ggi" to "b07c",
+        "ggo" to "af2c", "ggu" to "afb8", "ggya" to "ae84", "ggyae" to "aea0",
+        "ggyeo" to "aef4", "ggyo" to "af9c", "ggyu" to "b028", "gi" to "ae30",
+        "go" to "ace0", "gu" to "ad6c", "gya" to "ac38", "gyae" to "ac54",
+        "gyeo" to "aca8", "gyo" to "ad50", "gyu" to "addc", "ha" to "d558",
+        "hae" to "d574", "heo" to "d5c8", "heu" to "d750", "hi" to "d788",
+        "ho" to "d638", "hu" to "d6c4", "hya" to "d590", "hyae" to "d5ac",
+        "hyeo" to "d600", "hyo" to "d6a8", "hyu" to "d734", "i" to "c774",
+        "ib" to "c785", "id" to "c77b", "ig" to "c775", "ja" to "c790",
+        "jae" to "c7ac", "jeo" to "c800", "jeu" to "c988", "ji" to "c9c0",
+        "jja" to "c9dc", "jjae" to "c9f8", "jjeo" to "ca4c", "jjeu" to "cbd4",
+        "jji" to "cc0c", "jjo" to "cabc", "jju" to "cb48", "jo" to "c870",
+        "ju" to "c8fc", "ka" to "ce74", "kae" to "ce90", "keo" to "cee4",
+        "keu" to "d06c", "ki" to "d0a4", "ko" to "cf54", "ku" to "cfe0",
+        "kya" to "ceac", "kyae" to "cec8", "kyeo" to "cf1c", "kyo" to "cfc4",
+        "kyu" to "d050", "l" to "b974_tail", "la" to "b77c", "lae" to "b798",
+        "leo" to "b7ec", "leu" to "b974", "li" to "b9ac", "lo" to "b85c",
+        "lu" to "b8e8", "lya" to "b7b4", "lyae" to "b7d0", "lyeo" to "b824",
+        "lyo" to "b8cc", "lyu" to "b958", "m" to "bbc0_tail", "ma" to "b9c8",
+        "mae" to "b9e4", "meo" to "ba38", "meu" to "bbc0", "mi" to "bbf8",
+        "mo" to "baa8", "mu" to "bb34", "mya" to "ba00", "myae" to "ba1c",
+        "myeo" to "ba70", "myo" to "bb18", "myu" to "bba4", "n" to "b290_tail",
+        "na" to "b098", "nae" to "b0b4", "neo" to "b108", "neu" to "b290",
+        "ng" to "c751_tail", "ni" to "b2c8", "no" to "b178", "nu" to "b204",
+        "nya" to "b0d0", "nyae" to "b0ec", "nyeo" to "b140", "nyo" to "b1e8",
+        "nyu" to "b274", "o" to "c624", "ob" to "c635", "od" to "c62b",
+        "og" to "c625", "pa" to "d30c", "pae" to "d328", "peo" to "d37c",
+        "peu" to "d504", "pi" to "d53c", "po" to "d3ec", "pu" to "d478",
+        "pya" to "d344", "pyae" to "d360", "pyeo" to "d3b4", "pyo" to "d45c",
+        "pyu" to "d4e8", "sa" to "c0ac", "sae" to "c0c8", "seo" to "c11c",
+        "seu" to "c2a4", "si" to "c2dc", "so" to "c18c", "ssa" to "c2f8",
+        "ssae" to "c314", "sseo" to "c368", "sseu" to "c4f0", "ssi" to "c528",
+        "sso" to "c3d8", "ssu" to "c464", "ssya" to "c330", "ssyae" to "c34c",
+        "ssyeo" to "c3a0", "ssyo" to "c448", "ssyu" to "c4d4", "su" to "c218",
+        "sya" to "c0e4", "syae" to "c100", "syeo" to "c154", "syo" to "c1fc",
+        "syu" to "c288", "ta" to "d0c0", "tae" to "d0dc", "teo" to "d130",
+        "teu" to "d2b8", "ti" to "d2f0", "to" to "d1a0", "tu" to "d22c",
+        "tya" to "d0f8", "tyae" to "d114", "tyeo" to "d168", "tyo" to "d210",
+        "tyu" to "d29c", "u" to "c6b0", "ub" to "c6c1", "ud" to "c6b7",
+        "ug" to "c6b1", "ya" to "c57c", "yab" to "c58d", "yad" to "c583",
+        "yae" to "c598", "yaeb" to "c5a9", "yaed" to "c59f", "yaeg" to "c599",
+        "yag" to "c57d", "yeo" to "c5ec", "yeob" to "c5fd", "yeod" to "c5f3",
+        "yeog" to "c5ed", "yo" to "c694", "yob" to "c6a5", "yod" to "c69b",
+        "yog" to "c695", "yu" to "c720", "yub" to "c731", "yud" to "c727",
+        "yug" to "c721"
+    )
+
+    /** The actual asset filename (no extension) for a base romanized piece
+     * name - `name` itself unless the bank has "hex_pieces": true, in
+     * which case it's PIECE_HEX_NAMES[name]. Mirrors korean_tts.py's
+     * piece_filename() exactly. */
+    private fun pieceFilename(name: String, hexPieces: Boolean): String {
+        if (!hexPieces) return name
+        return PIECE_HEX_NAMES[name] ?: name
+    }
+
+    /** sound/<voice>/bank.json's "settings.hex_pieces" field, or false if
+     * missing/unreadable/malformed - same fallback bankType() uses for
+     * "type". */
+    private fun bankHexPieces(assets: AssetManager, voice: String): Boolean {
+        return try {
+            val text = assets.open("sound/$voice/bank.json").bufferedReader().use { it.readText() }
+            org.json.JSONObject(text).optJSONObject("settings")?.optBoolean("hex_pieces", false) ?: false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     class AudioException(message: String) : Exception(message)
 
     /** Result of [buildAudio]: the assembled track plus any sample names that had no matching file. */
@@ -348,9 +447,10 @@ object AudioEngine {
         val missing = mutableListOf<String>()
         val rawCache = HashMap<String, ShortArray?>()
         var prevEndsInStop = false
+        val hexPieces = bankHexPieces(assets, voice)
 
-        fun loadRaw(name: String): ShortArray? =
-            rawCache.getOrPut(name) { readSample(assets, name, normalize, voice) }
+        fun loadRaw(fileName: String): ShortArray? =
+            rawCache.getOrPut(fileName) { readSample(assets, fileName, normalize, voice) }
 
         for (group in groups) {
             if (group.names == listOf(KoreanPhonology.PAUSE)) {
@@ -363,11 +463,15 @@ object AudioEngine {
                 for (s in stopGap) out.add(s)
             }
 
+            val fileNames = group.names.map { pieceFilename(it, hexPieces) }
+
             val chunks = mutableListOf<ShortArray>()
-            for ((i, name) in group.names.withIndex()) {
-                val raw = loadRaw(name)
+            for (i in group.names.indices) {
+                val name = group.names[i]
+                val fileName = fileNames[i]
+                val raw = loadRaw(fileName)
                 if (raw == null) {
-                    missing.add(name)
+                    missing.add(fileName)
                     continue
                 }
                 var chunk = raw.copyOf() // copy: about to be mutated

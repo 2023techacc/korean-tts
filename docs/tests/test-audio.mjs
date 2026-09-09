@@ -3,21 +3,27 @@
 // REAL sound/*.wav files (loaded via fs, not synthetic data). Run with:
 //   node test-audio.mjs
 import { readFileSync, existsSync } from "node:fs";
-import { readSample, buildAudio } from "../korean-audio.js";
+import { readSample, buildAudio, pieceFilename } from "../korean-audio.js";
 import { textToGroups } from "../korean-phonology.js";
 
 const ref = JSON.parse(readFileSync(new URL("./audio_reference.json", import.meta.url)));
 const SOUND_DIR = new URL("../sound/default/", import.meta.url);
 
-function loadFileBuffer(name) {
-  const path = new URL(`${name}.wav`, SOUND_DIR);
+// sound/default is hex_pieces (see korean_tts.py's piece_filename) - this
+// loads by the ACTUAL on-disk filename. buildAudio() does its own
+// translation internally (see hexPieces below), so loadSampleBuffer stays
+// untranslated to avoid double-applying it; the standalone sample-loading
+// test below translates explicitly since it calls this directly with a
+// logical name from audio_reference.json.
+function loadFileBuffer(fileName) {
+  const path = new URL(`${fileName}.wav`, SOUND_DIR);
   if (!existsSync(path)) return null;
   const buf = readFileSync(path);
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 }
 
-async function loadSampleBuffer(name) {
-  return loadFileBuffer(name);
+async function loadSampleBuffer(fileName) {
+  return loadFileBuffer(fileName);
 }
 
 function arraysEqual(a, b) {
@@ -30,7 +36,7 @@ let failures = 0;
 
 console.log("--- individual sample loading (parse+downmix+resample+trim+normalize) ---");
 for (const [name, expected] of Object.entries(ref.samples)) {
-  const buf = loadFileBuffer(name);
+  const buf = loadFileBuffer(pieceFilename(name, true));
   const got = Array.from(readSample(buf));
   const ok = arraysEqual(got, expected);
   if (!ok) {
@@ -50,7 +56,7 @@ for (const [name, expected] of Object.entries(ref.samples)) {
 console.log("\n--- full build_audio (default settings) ---");
 for (const [phrase, expected] of Object.entries(ref.builds)) {
   const groups = textToGroups(phrase);
-  const { samples, missing } = await buildAudio(groups, loadSampleBuffer);
+  const { samples, missing } = await buildAudio(groups, loadSampleBuffer, { hexPieces: true });
   const got = Array.from(samples);
   const ok = arraysEqual(got, expected.samples) && JSON.stringify(missing) === JSON.stringify(expected.missing);
   if (!ok) {

@@ -17,10 +17,11 @@ import sys
 
 import korean_tts as ktts
 
-DEFAULT_SOUND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sound")
-DEFAULT_OVERRIDES_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ktts.DEFAULT_OVERRIDES_FILENAME
-)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_SOUND_DIR = os.path.join(_SCRIPT_DIR, "sound")
+_OVERRIDES_DIR = os.path.join(_SCRIPT_DIR, ktts.OVERRIDES_SUBDIR)
+ktts.migrate_legacy_overrides(_SCRIPT_DIR, _OVERRIDES_DIR)
+DEFAULT_OVERRIDES_PATH = os.path.join(_OVERRIDES_DIR, ktts.DEFAULT_OVERRIDES_FILENAME)
 
 
 def info(msg=""):
@@ -216,6 +217,7 @@ def check(args):
     have = ktts.list_bank_files(sound_dir)
     phonology = ktts.resolve_phonology_options(bank_settings)
     naming = bank_settings.get("naming", "hex-codepoint")
+    hex_pieces = bool(bank_settings.get("hex_pieces"))
     fallback_name = bank_settings.get("fallback_bank")
 
     info(f"목소리     : {args.voice}")
@@ -224,7 +226,20 @@ def check(args):
 
     needed_total = set()
 
-    pieces_needed = ktts.all_reachable_samples(phonology)
+    # pieces_needed are logical romanized names (e.g. "ga") - translate to
+    # what's ACTUALLY on disk before comparing against `have`/reporting, so
+    # a hex_pieces bank's coverage/missing-list is checked against the
+    # right filenames instead of always reporting 0% (see korean_tts.
+    # piece_filename).
+    pieces_needed_logical = ktts.all_reachable_samples(phonology)
+    pieces_needed = {ktts.piece_filename(n, hex_pieces, naming) for n in pieces_needed_logical}
+    if bank_settings.get("dedicated_diphthongs"):
+        # A bare sonorant-tail piece (n/l/m/ng) some dedicated_diphthongs
+        # bank's own CV-block+coda-tail coverage already makes provably
+        # unreachable isn't actually needed, even though it's part of the
+        # base-pieces floor in general (see korean_tts.unreachable_bare_
+        # tails) - drop it from what this SPECIFIC bank is asked for.
+        pieces_needed = pieces_needed - ktts.unreachable_bare_tails(have, phonology, naming, hex_pieces)
     pieces_missing = sorted(pieces_needed - have)
     needed_total |= pieces_needed
     info(f"\n[조각] 필요 {len(pieces_needed)}개 - 보유 {len(pieces_needed & have)}개")
@@ -288,7 +303,8 @@ def main(argv=None):
                         help=f"받침 ㄱ/ㄷ/ㅂ(ㅋ,ㄲ,ㅌ 등 포함) 뒤에 추가로 쉬는 길이, "
                              f"기본 {ktts.DEFAULT_STOP_GAP_MS}ms (0이면 끔)")
     parser.add_argument("--overrides", default=DEFAULT_OVERRIDES_PATH, metavar="FILE",
-                        help="음성 조각별 미세조정 파일 위치, 기본 ./sound_overrides.json "
+                        help=f"음성 조각별 미세조정 파일 위치, 기본 ./{ktts.OVERRIDES_SUBDIR}/"
+                             f"{ktts.DEFAULT_OVERRIDES_FILENAME} "
                              "(고급 설정 GUI에서 저장한 파일 - 없으면 그냥 무시됨)")
     parser.add_argument("--no-overrides", action="store_true",
                         help="음성 조각별 미세조정을 끄고 자동 처리 결과만 사용")

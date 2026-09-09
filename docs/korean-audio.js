@@ -60,6 +60,75 @@ function endsInStopCoda(name) {
   return Boolean(name) && !CODA_TAILS.has(name) && "gdb".includes(name[name.length - 1]);
 }
 
+// Every romanized base piece name -> the hex codepoint of a real character
+// that produces exactly that recording (e.g. ga -> "ac00" == 가), used only
+// when a bank's bank.json sets settings.hex_pieces (see pieceFilename
+// below). Generated from korean_tts.py's PIECE_REPRESENTATIVE_CHARS - a
+// fixed, verified table, not re-derived here, so the ports can't drift
+// apart. "n"/"l"/"m"/"ng" get a "_tail" suffix: those four are recorded
+// SEPARATELY from the ordinary onset+vowel piece that happens to share the
+// same representative character (e.g. "n"'s 느 is also "neu"'s 느, but as a
+// trimmed coda-closure take, not the same file) - without the suffix,
+// hex-naming would silently collapse them onto one file.
+export const PIECE_HEX_NAMES = {
+  a: "c544", ab: "c555", ad: "c54b", ae: "c560", aeb: "c571",
+  aed: "c567", aeg: "c561", ag: "c545", ba: "bc14", bae: "bc30",
+  bba: "be60", bbae: "be7c", bbeo: "bed0", bbeu: "c058", bbi: "c090",
+  bbo: "bf40", bbu: "bfcc", bbya: "be98", bbyae: "beb4", bbyeo: "bf08",
+  bbyo: "bfb0", bbyu: "c03c", beo: "bc84", beu: "be0c", bi: "be44",
+  bo: "bcf4", bu: "bd80", bya: "bc4c", byae: "bc68", byeo: "bcbc",
+  byo: "bd64", byu: "bdf0", cha: "cc28", chae: "cc44", cheo: "cc98",
+  cheu: "ce20", chi: "ce58", cho: "cd08", chu: "cd94", da: "b2e4",
+  dae: "b300", dda: "b530", ddae: "b54c", ddeo: "b5a0", ddeu: "b728",
+  ddi: "b760", ddo: "b610", ddu: "b69c", ddya: "b568", ddyae: "b584",
+  ddyeo: "b5d8", ddyo: "b680", ddyu: "b70c", deo: "b354", deu: "b4dc",
+  di: "b514", do: "b3c4", du: "b450", dya: "b31c", dyae: "b338",
+  dyeo: "b38c", dyo: "b434", dyu: "b4c0", eo: "c5b4", eob: "c5c5",
+  eod: "c5bb", eog: "c5b5", eu: "c73c", eub: "c74d", eud: "c743",
+  eug: "c73d", ga: "ac00", gae: "ac1c", geo: "ac70", geu: "adf8",
+  gga: "ae4c", ggae: "ae68", ggeo: "aebc", ggeu: "b044", ggi: "b07c",
+  ggo: "af2c", ggu: "afb8", ggya: "ae84", ggyae: "aea0", ggyeo: "aef4",
+  ggyo: "af9c", ggyu: "b028", gi: "ae30", go: "ace0", gu: "ad6c",
+  gya: "ac38", gyae: "ac54", gyeo: "aca8", gyo: "ad50", gyu: "addc",
+  ha: "d558", hae: "d574", heo: "d5c8", heu: "d750", hi: "d788",
+  ho: "d638", hu: "d6c4", hya: "d590", hyae: "d5ac", hyeo: "d600",
+  hyo: "d6a8", hyu: "d734", i: "c774", ib: "c785", id: "c77b",
+  ig: "c775", ja: "c790", jae: "c7ac", jeo: "c800", jeu: "c988",
+  ji: "c9c0", jja: "c9dc", jjae: "c9f8", jjeo: "ca4c", jjeu: "cbd4",
+  jji: "cc0c", jjo: "cabc", jju: "cb48", jo: "c870", ju: "c8fc",
+  ka: "ce74", kae: "ce90", keo: "cee4", keu: "d06c", ki: "d0a4",
+  ko: "cf54", ku: "cfe0", kya: "ceac", kyae: "cec8", kyeo: "cf1c",
+  kyo: "cfc4", kyu: "d050", l: "b974_tail", la: "b77c", lae: "b798",
+  leo: "b7ec", leu: "b974", li: "b9ac", lo: "b85c", lu: "b8e8",
+  lya: "b7b4", lyae: "b7d0", lyeo: "b824", lyo: "b8cc", lyu: "b958",
+  m: "bbc0_tail", ma: "b9c8", mae: "b9e4", meo: "ba38", meu: "bbc0",
+  mi: "bbf8", mo: "baa8", mu: "bb34", mya: "ba00", myae: "ba1c",
+  myeo: "ba70", myo: "bb18", myu: "bba4", n: "b290_tail", na: "b098",
+  nae: "b0b4", neo: "b108", neu: "b290", ng: "c751_tail", ni: "b2c8",
+  no: "b178", nu: "b204", nya: "b0d0", nyae: "b0ec", nyeo: "b140",
+  nyo: "b1e8", nyu: "b274", o: "c624", ob: "c635", od: "c62b",
+  og: "c625", pa: "d30c", pae: "d328", peo: "d37c", peu: "d504",
+  pi: "d53c", po: "d3ec", pu: "d478", pya: "d344", pyae: "d360",
+  pyeo: "d3b4", pyo: "d45c", pyu: "d4e8", sa: "c0ac", sae: "c0c8",
+  seo: "c11c", seu: "c2a4", si: "c2dc", so: "c18c", ssa: "c2f8",
+  ssae: "c314", sseo: "c368", sseu: "c4f0", ssi: "c528", sso: "c3d8",
+  ssu: "c464", ssya: "c330", ssyae: "c34c", ssyeo: "c3a0", ssyo: "c448",
+  ssyu: "c4d4", su: "c218", sya: "c0e4", syae: "c100", syeo: "c154",
+  syo: "c1fc", syu: "c288", ta: "d0c0", tae: "d0dc", teo: "d130",
+  teu: "d2b8", ti: "d2f0", to: "d1a0", tu: "d22c", tya: "d0f8",
+  tyae: "d114", tyeo: "d168", tyo: "d210", tyu: "d29c", u: "c6b0",
+  ub: "c6c1", ud: "c6b7", ug: "c6b1", ya: "c57c", yab: "c58d",
+  yad: "c583", yae: "c598", yaeb: "c5a9", yaed: "c59f", yaeg: "c599",
+  yag: "c57d", yeo: "c5ec", yeob: "c5fd", yeod: "c5f3", yeog: "c5ed",
+  yo: "c694", yob: "c6a5", yod: "c69b", yog: "c695", yu: "c720",
+  yub: "c731", yud: "c727", yug: "c721",
+};
+
+export function pieceFilename(name, hexPieces) {
+  if (!hexPieces) return name;
+  return PIECE_HEX_NAMES[name] ?? name;
+}
+
 class AudioError extends Error {}
 
 // ------------------------------------------------------
@@ -281,6 +350,7 @@ export async function buildAudio(groups, loadSampleBuffer, options = {}) {
     crossfade = true,
     speed = 1.0,
     stopGapMs = DEFAULT_STOP_GAP_MS,
+    hexPieces = false,
   } = options;
 
   const chunks = [];
@@ -292,12 +362,16 @@ export async function buildAudio(groups, loadSampleBuffer, options = {}) {
   let prevEndsInStop = false;
   let totalLength = 0;
 
-  async function loadRaw(name) {
-    if (rawCache.has(name)) return rawCache.get(name);
+  // `name` is always the stable LOGICAL romanized name (e.g. "ga") text_to_
+  // groups-equivalent output constructs - `fileName` is what's actually
+  // fetched/cached/reported missing (see pieceFilename). Already-hex names
+  // pass through unchanged, so this is safe regardless of hexPieces.
+  async function loadRaw(fileName) {
+    if (rawCache.has(fileName)) return rawCache.get(fileName);
     let raw = null;
-    const buf = await loadSampleBuffer(name);
+    const buf = await loadSampleBuffer(fileName);
     if (buf) raw = readSample(buf, normalize);
-    rawCache.set(name, raw);
+    rawCache.set(fileName, raw);
     return raw;
   }
 
@@ -317,9 +391,10 @@ export async function buildAudio(groups, loadSampleBuffer, options = {}) {
     const groupChunks = [];
     for (let i = 0; i < group.names.length; i++) {
       const name = group.names[i];
-      const raw = await loadRaw(name);
+      const fileName = pieceFilename(name, hexPieces);
+      const raw = await loadRaw(fileName);
       if (!raw) {
-        missing.push(name);
+        missing.push(fileName);
         continue;
       }
       let chunk = raw.slice(); // copy: about to be mutated

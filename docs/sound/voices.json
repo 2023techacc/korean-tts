@@ -1,6 +1,8 @@
 {
   "voices": [
-    {"name": "default", "type": "pieces"}
+    {"name": "default", "type": "pieces", "hex_pieces": true}
+    ,{"name": "1000", "type": "pieces", "hex_pieces": true}
+    ,{"name": "diphault", "type": "diphone", "hex_pieces": false}
 
   ]
 }

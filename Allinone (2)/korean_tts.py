@@ -374,23 +374,44 @@ def _hex_tier_jung(jung: str, phonology) -> str:
     return _hex_tier_jung_candidates(jung, phonology)[-1]
 
 
+def _is_base_piece_equivalent(cho: str, jung: str, jong: str) -> bool:
+    """True when a full (cho, jung, jong) syllable would sound IDENTICAL to
+    a base romanized piece that's already required regardless of any hex
+    tier - recording it again under a hex name (all_reachable_full_
+    syllables/syllable_overrides) would just be the exact same take twice
+    (e.g. 아 == the existing "a" piece, 압 == the existing "ab" piece). Only
+    true for a null onset with a ROMAN-simple vowel (covered directly by
+    the bare-vowel piece) and no coda or a stop coda (covered by the
+    vowel+stop-coda piece) - a REAL onset is never equivalent here even
+    with a matching vowel+no-coda (간 has no single existing base piece the
+    way 아 does; see all_diphone_cv_blocks for that ONSET-inclusive
+    exclusion, which only needs to worry about no-coda at all). A SONORANT
+    coda (안 etc.) is also NOT equivalent - the base pieces only reach that
+    as two separately spliced pieces ("a"+"n"), so a real, whole 안
+    recording is strictly better, not a duplicate (see text_to_groups'
+    cho=="ㅇ" shortcut, which relies on exactly that being worth
+    recording)."""
+    return cho == "ㅇ" and jung in ROMAN and (not jong or jong in ("ㄱ", "ㄷ", "ㅂ"))
+
+
 def all_reachable_full_syllables(phonology=None) -> set:
     """The subset of all_full_syllables() actually reachable through
     _apply_local_vowel_rules + FINAL_MAP neutralization + OE_WAE_MERGE
-    before a syllable_overrides lookup happens - analogous to how
-    all_reachable_samples() is the reachable subset of the pieces type's
-    raw sample-name space. By default: 325 distinct (cho,jung) pairs x 8
-    surface finals (no-coda + the 7 audible finals) = 2,600 syllables -
-    palatal-onset yotized vowels (쟈/져/쳐 collapse to 자/저/처, unless
-    distinguish_palatal_glide), non-'ㅇ'-onset ㅢ (희->히, unless
+    before a syllable_overrides lookup happens, minus anything
+    _is_base_piece_equivalent() to an already-required base piece -
+    analogous to how all_reachable_samples() is the reachable subset of
+    the pieces type's raw sample-name space. By default: 2,544 - the raw
+    325x8=2,600 (see all_diphone_cv_blocks) minus 56 (14 null-onset ROMAN-
+    simple vowels x 4 base-piece-equivalent finals: no-coda + the 3 stop
+    codas ㄱ/ㄷ/ㅂ - e.g. 아/압 would just duplicate the existing "a"/"ab"
+    pieces). Palatal-onset yotized vowels (쟈/져/쳐 collapse to 자/저/처,
+    unless distinguish_palatal_glide), non-'ㅇ'-onset ㅢ (희->히, unless
     preserve_consonant_ui), and ㅚ/ㅞ (merge into ㅙ, unless
     distinguish_oe_wae) never survive to reach a filename otherwise. With
-    distinguish_oe_wae on (merge lifted, ㅚ/ㅞ own splits restored to their
-    own codepoints): 363x8=2,904 - the count this function always returned
-    before that setting existed. Every flag on: 399x8=3,192 (every raw
-    (cho,jung) pair, nothing left to collapse or merge). Counts verified by
-    running this exact logic against the real tables, not computed by
-    hand."""
+    distinguish_oe_wae on: 2,904-56=2,848 (still 56 excluded - the merge
+    only affects compound vowels, never a ROMAN-simple one). Counts
+    verified by running this exact logic against the real tables, not
+    computed by hand."""
     phonology = phonology if phonology is not None else PhonologyOptions()
     reachable = set()
     for cho in CHOSEONG:
@@ -400,36 +421,59 @@ def all_reachable_full_syllables(phonology=None) -> set:
             norm_jung = _hex_tier_jung(slot[1], phonology)
             for jong in JONGSEONG:
                 norm_jong = FINAL_MAP.get(jong, jong) if jong else ""
+                if _is_base_piece_equivalent(cho, norm_jung, norm_jong):
+                    continue
                 reachable.add(_compose(cho, norm_jung, norm_jong))
     return reachable
 
 
 def all_diphone_cv_blocks(phonology=None) -> set:
     """One recording per reachable (onset, nucleus) pair, composed with no
-    coda (jong="") - dedicated_diphthongs' onset+vowel half. Same
-    reachable-pair definition and count as all_reachable_full_syllables()
-    (325 by default, 363 with distinguish_oe_wae)."""
+    coda (jong="") - EXCLUDING any pair whose vowel is ROMAN-simple. That
+    exclusion isn't just the null-onset case: for ANY onset, "onset +
+    simple vowel, no coda" is already exactly one of the base romanized
+    pieces (베 == "be", 그 == "geu", 아 == the bare-vowel "a" for a null
+    onset) - the base pieces ARE the complete onset x simple-vowel table
+    already (see _romanized_piece_names), so a hex CV-block only earns its
+    keep for a COMPOUND vowel (화 == "ho"+"ae" split in the base scheme,
+    but a genuinely different, single continuous sound as its own take).
+    5 distinct compound-vowel groups (ㅘ/ㅙ[+merged ㅚ,ㅞ]/ㅝ/ㅟ/ㅢ) x 19
+    onsets = 77 by default - a much smaller set than the raw 325
+    (cho,jung) pairs before this exclusion existed. 115 with
+    distinguish_oe_wae (7 groups, ㅚ/ㅞ no longer merged into ㅙ), 95 with
+    preserve_consonant_ui (ㅢ stays compound for every onset instead of
+    only cho=="ㅇ", +18 pairs)."""
     phonology = phonology if phonology is not None else PhonologyOptions()
     blocks = set()
     for cho in CHOSEONG:
         for jung in JUNGSEONG:
             slot = [cho, jung, ""]
             _apply_local_vowel_rules([slot], phonology)
-            blocks.add(_compose(cho, _hex_tier_jung(slot[1], phonology), ""))
+            norm_jung = _hex_tier_jung(slot[1], phonology)
+            if norm_jung in ROMAN:
+                continue
+            blocks.add(_compose(cho, norm_jung, ""))
     return blocks
 
 
 def all_diphone_coda_tails(phonology=None) -> set:
     """One recording per (nucleus, coda) pair, composed with a null onset
-    (ㅇ) - dedicated_diphthongs' nucleus+coda half. A null-onset syllable
-    genuinely IS what a bare nucleus+coda sounds like (the same principle
-    sound/default/'s existing "ab.wav"-style pieces already use). A fixed
-    cho="ㅇ" is already exempt from every local vowel collapse rule, so the
-    only PhonologyOptions field that affects this is distinguish_oe_wae:
-    off (default) skips ㅚ/ㅞ entirely (their CV-blocks already compose
-    with ㅙ's codepoint via _hex_tier_jung, so a same-vowel coda-tail join
-    only ever needs ㅙ's tail) - 19 nuclei x 7 audible finals = 133. On:
-    all 21 nuclei x 7 = 147."""
+    (ㅇ) - dedicated_diphthongs' nucleus+coda half - EXCLUDING any pair
+    that's _is_base_piece_equivalent() to an existing base piece. That only
+    ever fires for a ROMAN-simple vowel + a STOP coda (ㄱ/ㄷ/ㅂ): e.g. 압
+    (ㅇ+ㅏ+ㅂ) is already exactly the base piece "ab" - recording it again
+    as a coda-tail would be the same take twice, just like the CV-block
+    exclusion above. A SONORANT coda (안 etc.) is never excluded - that's
+    the whole reason this tier is worth using at all for those (see
+    text_to_groups' cho=="ㅇ" shortcut). A fixed cho="ㅇ" is already exempt
+    from every local vowel collapse rule, so the only PhonologyOptions
+    field that affects this is distinguish_oe_wae: off (default) also
+    skips ㅚ/ㅞ entirely (their CV-blocks already compose with ㅙ's
+    codepoint via _hex_tier_jung, so a same-vowel coda-tail join only ever
+    needs ㅙ's tail). 91 by default (19 nuclei x 7 audible finals = 133,
+    minus 14 simple/y-glide vowels x 3 stop codas = 42), 105 with
+    distinguish_oe_wae (147 minus 42 - the merge only affects compound
+    vowels, so the same 42 stop-coda exclusions apply either way)."""
     phonology = phonology if phonology is not None else PhonologyOptions()
     tails = set()
     for jung in JUNGSEONG:
@@ -439,8 +483,56 @@ def all_diphone_coda_tails(phonology=None) -> set:
             if not jong:
                 continue
             norm_jong = FINAL_MAP.get(jong, jong)
+            if _is_base_piece_equivalent("ㅇ", jung, norm_jong):
+                continue
             tails.add(_compose("ㅇ", jung, norm_jong))
     return tails
+
+
+def unreachable_bare_tails(have: set, phonology=None, naming: str = "hex-codepoint",
+                            hex_pieces: bool = False) -> set:
+    """Bare sonorant-tail piece names (n/l/m/ng, translated per hex_pieces)
+    that text_to_groups()'s cascade can PROVABLY never actually reach,
+    given the files a bank already has in `have` (a set of on-disk
+    filenames, no extension - see list_bank_files). Only meaningful for a
+    dedicated_diphthongs bank.
+
+    The bare tail for coda X is only ever consulted when a syllable's
+    CV-block hex file exists but its own coda-tail hex file (nucleus+X)
+    doesn't (see text_to_groups' "if norm_jong in SONORANTS" branch) - if
+    the coda-tail ALWAYS exists whenever the matching CV-block does, the
+    diphone join succeeds first and the legacy fallback is never tried. If
+    the CV-block itself is missing for some (cho, jung), that syllable
+    falls through to tier 3's plain split instead, which ALSO needs the
+    bare tail - so unreachability additionally requires the CV-block to
+    always exist. Checked against every (cho, jung) pair (after local
+    vowel rules + the oe/wae merge), not just the ones some particular
+    text happens to use, so this is a genuine proof of unreachability, not
+    a sample of it. Used to stop a bank's own walkthrough/--check from
+    asking it to record a piece its own cascade can never call on (see
+    voice_recorder.py's _open_bank)."""
+    phonology = phonology if phonology is not None else PhonologyOptions()
+    unreachable = set()
+    for jong in SONORANTS:
+        ok = True
+        for cho in CHOSEONG:
+            for jung in JUNGSEONG:
+                slot = [cho, jung, ""]
+                _apply_local_vowel_rules([slot], phonology)
+                norm_jung = _hex_tier_jung(slot[1], phonology)
+                cv_name = syllable_filename(_compose(cho, norm_jung, ""), naming)
+                if cv_name not in have:
+                    ok = False
+                    break
+                tail_name = syllable_filename(_compose("ㅇ", norm_jung, jong), naming)
+                if tail_name not in have:
+                    ok = False
+                    break
+            if not ok:
+                break
+        if ok:
+            unreachable.add(piece_filename(ROMAN[jong], hex_pieces, naming))
+    return unreachable
 
 
 def _parse_and_apply_rules(text: str, phonology=None):
@@ -608,6 +700,28 @@ def text_to_groups(text: str, dedicated_diphthong_check=None, syllable_override_
         if dedicated_diphthong_check is not None:
             cho, jung, jong = slot
             norm_jong = FINAL_MAP.get(jong, jong) if jong in CONSONANTS else jong
+
+            if cho == "ㅇ" and norm_jong:
+                # No real onset AND a coda: the coda-tail recording, composed
+                # with the same null onset, already IS this exact syllable
+                # (e.g. synthesizing 안 would otherwise crossfade "아"+"안"
+                # together, when "안" alone is already the correct, complete
+                # recording - no join, no double-vowel-attack artifact, no
+                # crossfade tuning needed at all for this case).
+                exact_tail = None
+                for cand_jung in _hex_tier_jung_candidates(jung, phonology):
+                    cand_name = syllable_filename(_compose("ㅇ", cand_jung, norm_jong), naming)
+                    if dedicated_diphthong_check(cand_name):
+                        exact_tail = cand_name
+                        break
+                if exact_tail is not None:
+                    groups.append(("single", [exact_tail]))
+                    continue
+                # Not recorded on its own - fall through to the ordinary
+                # CV+tail cascade below, which for cho=="ㅇ" just repeats
+                # this same tail lookup (harmless) after also requiring a
+                # bare-vowel CV block, and still degrades further from there.
+
             cv_name, cv_jung = None, jung
             for cand_jung in _hex_tier_jung_candidates(jung, phonology):
                 cand_name = syllable_filename(_compose(cho, cand_jung, ""), naming)
@@ -728,6 +842,123 @@ def _romanized_piece_names() -> frozenset:
 
 
 ROMANIZED_PIECE_NAMES = _romanized_piece_names()
+
+
+def _piece_representative_chars() -> dict:
+    """name -> a real Hangul character that, said aloud, produces exactly
+    that base piece's recording (가 for "ga", 아 for "a", ...). Mirrors
+    voice_recorder.build_prompt_map() exactly (verified: identical keys and
+    values) - duplicated here rather than imported, since the engine now
+    needs it too (see piece_filename), not just the recorder's prompts.
+    The four bare sonorant tails have no natural one-syllable target (a
+    plain consonant isn't sayable alone), so they use the same mini-
+    syllable-with-ㅡ convention the recorded pieces themselves already use
+    (느/르/므/응)."""
+    examples = {}
+    simple_vowels = [v for v in JUNGSEONG if v in ROMAN]
+    for cho in CHOSEONG:
+        for jung in simple_vowels:
+            examples.setdefault(ROMAN[cho] + ROMAN[jung], _compose(cho, jung, ""))
+    stop_jong = [j for j in JONGSEONG if j in ("ㄱ", "ㄷ", "ㅂ")]
+    for jung in simple_vowels:
+        examples.setdefault(ROMAN[jung], _compose("ㅇ", jung, ""))
+        for jong in stop_jong:
+            examples.setdefault(ROMAN[jung] + ROMAN[jong], _compose("ㅇ", jung, jong))
+    examples["n"] = "느"
+    examples["l"] = "르"
+    examples["m"] = "므"
+    examples["ng"] = "응"
+    return examples
+
+
+PIECE_REPRESENTATIVE_CHARS = _piece_representative_chars()
+
+
+def piece_filename(name: str, hex_pieces: bool, naming: str = "hex-codepoint") -> str:
+    """The actual on-disk identifier (no extension) for a base romanized
+    piece - `name` itself unless the bank's `hex_pieces` setting is on, in
+    which case it's the hex codepoint (or literal Hangul character,
+    depending on `naming`) of PIECE_REPRESENTATIVE_CHARS[name]. Every other
+    piece of reasoning (crossfade kind, CODA_TAILS/stop-coda detection,
+    override lookups keyed by whatever this returns) stays in terms of
+    that returned value - `name` is only ever the STABLE logical identity
+    text_to_groups constructs from ROMAN, never itself a guarantee about
+    what's on disk. A name this function doesn't recognize (e.g. an
+    already-hex tier-1/2 name) passes through unchanged, so this is safe
+    to call unconditionally on any group member.
+
+    The four CODA_TAILS names (n/l/m/ng) get a "_tail" suffix on top of
+    the hex code: three of them (n/l/m) share their representative
+    character (느/르/므) with an ORDINARY onset+vowel piece (neu/leu/meu) -
+    same character, but a genuinely different, separately-recorded take
+    (the tail is trimmed short for use as a coda continuation; the onset+
+    vowel piece is a full syllable-initial utterance - verified: sound/
+    default's neu.wav and n.wav are different recordings, different
+    lengths). Without the suffix, hex-naming would silently collapse them
+    onto one file. "ng"/eu don't actually collide (응 vs 으 are different
+    codepoints) but get the same suffix anyway for a consistent,
+    predictable rule rather than 3-out-of-4 doing something different."""
+    if not hex_pieces:
+        return name
+    ch = PIECE_REPRESENTATIVE_CHARS.get(name)
+    if ch is None:
+        return name
+    base = syllable_filename(ch, naming)
+    return base + "_tail" if name in CODA_TAILS else base
+
+
+# Standard-ish Revised Romanization for the 7 compound vowels, used only by
+# search_key() below - distinct from ROMAN, which has no single-string
+# entry for these at all (the piece-splitting scheme always represents a
+# compound vowel as two separate ROMAN pieces, e.g. 화 -> "ho"+"ae", never
+# a single "hwa" piece) but a search box should still find 화 for "hwa".
+_SEARCH_COMPOUND_ROMAN = {"ㅘ": "wa", "ㅙ": "wae", "ㅚ": "oe", "ㅝ": "wo", "ㅞ": "we", "ㅟ": "wi", "ㅢ": "ui"}
+
+
+def _search_pronunciation(ch: str) -> str:
+    """A search-friendly (not piece-splitting-accurate) romanization of one
+    composed Hangul character, e.g. 화->"hwa", 안->"an", 학->"hag" - close
+    to standard Revised Romanization. Only used by search_key(); has no
+    bearing on any piece name, file, or audio-assembly logic."""
+    offset = ord(ch) - HANGUL_START
+    cho = CHOSEONG[offset // 588]
+    jung = JUNGSEONG[(offset % 588) // 28]
+    jong = JONGSEONG[offset % 28]
+    cho_r = "" if cho == "ㅇ" else ROMAN.get(cho, "")
+    jung_r = _SEARCH_COMPOUND_ROMAN.get(jung) or ROMAN.get(jung, "")
+    jong_r = ROMAN.get(FINAL_MAP.get(jong, jong), "") if jong else ""
+    return cho_r + jung_r + jong_r
+
+
+def search_key(name: str) -> str:
+    """Everything a user might type to find sample `name` in a search box
+    (gui.py's TuningTab), lowercased and space-joined: the raw filename,
+    its pronunciation, and (if it represents one) the real Hangul
+    character - so search can match by hex filename, romanized reading, OR
+    the character itself, without changing what's actually stored/
+    displayed as the piece's name. Recognizes a known romanized base-piece
+    name FIRST (before ever trying to parse it as hex), matching how
+    piece_filename()/_exists_check() avoid the same bbae/뮳-style
+    collision - "bbae" is treated as the piece it actually is, never as
+    hex for 뮳."""
+    parts = [name.lower()]
+    base = name[:-5] if name.endswith("_tail") else name  # strip hex_pieces' bare-tail suffix
+    ch = PIECE_REPRESENTATIVE_CHARS.get(base)
+    if ch is not None:
+        parts.append(base.lower())
+    else:
+        try:
+            code = int(base, 16)
+        except ValueError:
+            code = None
+        if code is not None and HANGUL_START <= code <= HANGUL_END:
+            ch = chr(code)
+        elif len(base) == 1 and is_syllable(base):
+            ch = base  # "hangul" naming mode: the filename IS the character
+    if ch is not None:
+        parts.append(ch)
+        parts.append(_search_pronunciation(ch).lower())
+    return " ".join(parts)
 
 
 # ------------------------------------------------------
@@ -875,6 +1106,39 @@ def normalize_loudness(
 # build_audio's behavior fully determined by its explicit arguments.
 
 DEFAULT_OVERRIDES_FILENAME = "sound_overrides.json"
+# Subfolder (next to the .exe/script) the overrides file(s) live in - kept
+# out of the top-level folder since it's internal fine-tuning data, not
+# something a normal user opening the folder needs to see (unlike sound/ or
+# the .exe itself). See migrate_legacy_overrides() for picking up files
+# already sitting at the old top-level location from before this existed.
+OVERRIDES_SUBDIR = "config"
+
+
+def migrate_legacy_overrides(old_dir: str, new_dir: str) -> None:
+    """One-time migration: move any sound_overrides*.json sitting directly
+    in `old_dir` (the top-level location used before overrides moved into
+    OVERRIDES_SUBDIR) into `new_dir`, so already-tuned settings survive the
+    move instead of silently resetting. No-op if there's nothing to move or
+    `new_dir` already has that file (never overwrites)."""
+    if not os.path.isdir(old_dir) or os.path.abspath(old_dir) == os.path.abspath(new_dir):
+        return
+    prefix = os.path.splitext(DEFAULT_OVERRIDES_FILENAME)[0]  # "sound_overrides"
+    try:
+        entries = os.listdir(old_dir)
+    except OSError:
+        return
+    for fname in entries:
+        if not (fname.startswith(prefix) and fname.endswith(".json")):
+            continue
+        old_path = os.path.join(old_dir, fname)
+        new_path = os.path.join(new_dir, fname)
+        if not os.path.isfile(old_path) or os.path.exists(new_path):
+            continue
+        try:
+            os.makedirs(new_dir, exist_ok=True)
+            os.replace(old_path, new_path)
+        except OSError:
+            pass
 
 
 # ------------------------------------------------------
@@ -1028,6 +1292,9 @@ def load_overrides(path: str) -> dict:
 
 
 def save_overrides(path: str, overrides: dict) -> None:
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(overrides, f, ensure_ascii=False, indent=2, sort_keys=True)
 
@@ -1116,16 +1383,32 @@ def _apply_fade(samples: array.array, fade_len: int):
 
 # How much of the shorter of two adjacent clips to overlap, as a fraction of
 # its length: generous for a diphthong (blending vowel qualities together IS
-# the correct glide sound), lighter for a sonorant coda (don't swallow the
-# consonant's identity, just trim the dead air of playing it as a whole
-# separate syllable). "diphone" (a CV-block+coda-tail join in text_to_groups)
-# uses the same lighter overlap as "coda" by default - both join a
-# complete vowel realization to a following consonant, not two half-vowels.
-# Clamped in samples so a very short or very long clip doesn't produce a
-# degenerate (near-zero or near-total) overlap.
-CROSSFADE_FRACTION = {"diphthong": 0.50, "coda": 0.25, "diphone": 0.25}
-CROSSFADE_MIN_MS = 20
-CROSSFADE_MAX_MS = 150
+# the correct glide sound), lighter for a sonorant "coda" tail (a short n/l/
+# m/ng closure-shaped mini-recording, or the "ag"-style legacy vowel+coda
+# piece - don't swallow the consonant's identity, just trim the dead air of
+# playing it as a whole separate syllable).
+#
+# "diphone" (a CV-block+coda-tail join in text_to_groups, e.g. 아+안 for 안)
+# used to share "coda"'s lighter overlap on the theory that both join a
+# complete vowel to a following consonant. That theory doesn't quite hold
+# for "diphone" specifically: unlike "coda"'s tail (already just the
+# consonant's essence), a hex-named coda-tail is a FULL separately-recorded
+# syllable that itself starts with the same vowel all over again - joining
+# it lightly leaves that vowel's onset audibly repeated (819->"아안", not one
+# continuous 안), stretching the vowel unnaturally long. A bigger overlap
+# absorbs more of that redundant repeated vowel into the blend instead of
+# concatenating it whole - confirmed by a real hand-tuned bank (sound/
+# diphault) already overriding a "diphone" join's crossfade_ms up to the old
+# ceiling (150) well past what its 0.25 fraction alone would produce (its 아/
+# 안 pair: shorter clip 479ms x 0.25 = 120ms, not even hitting 150 - so
+# 0.25 undershoots even the old ceiling for a typical pair, before
+# considering whether the ceiling itself was also limiting).
+#
+# Clamped in samples (per-kind min/max) so a very short or very long clip
+# doesn't produce a degenerate (near-zero or near-total) overlap.
+CROSSFADE_FRACTION = {"diphthong": 0.50, "coda": 0.25, "diphone": 0.40}
+CROSSFADE_MIN_MS = {"diphthong": 20, "coda": 20, "diphone": 20}
+CROSSFADE_MAX_MS = {"diphthong": 150, "coda": 150, "diphone": 220}
 
 # The bare consonant recordings standing in for a sonorant batchim (ㄴㄹㅁㅇ)
 # run 150-230ms on their own — they were recorded as a full mini-syllable
@@ -1152,12 +1435,27 @@ STOP_CODA_ENDINGS = ("g", "d", "b")
 DEFAULT_STOP_GAP_MS = 40
 
 
+# The three crossfade settings below are per-kind dicts ("diphthong"/"coda"/
+# "diphone" - see CROSSFADE_FRACTION) - a bank.json "audio" override for any
+# of them may give either a full replacement dict (merged over the default
+# per-kind, so e.g. {"diphone": 0.6} only touches that one kind) or a single
+# flat number, applied uniformly to every kind (mainly useful for
+# crossfade_min_ms/max_ms, which most banks have no reason to vary by kind).
+_PER_KIND_CROSSFADE_KEYS = {
+    "crossfade_fraction": CROSSFADE_FRACTION,
+    "crossfade_min_ms": CROSSFADE_MIN_MS,
+    "crossfade_max_ms": CROSSFADE_MAX_MS,
+}
+
+
 class AudioSettings:
     """Resolved audio-assembly constants for one bank. Every field defaults
     to exactly the module constants above, so AudioSettings() (no args) -
     what every function below falls back to when a caller doesn't supply
     one - reproduces today's behavior precisely. A bank's bank.json "audio"
-    block (see resolve_audio_settings) can override any subset of these.
+    block (see resolve_audio_settings) can override any subset of these -
+    see _PER_KIND_CROSSFADE_KEYS above for how the three crossfade settings
+    merge instead of fully replacing.
     """
 
     _DEFAULTS = {
@@ -1175,8 +1473,14 @@ class AudioSettings:
 
     def __init__(self, **overrides):
         for key, default in self._DEFAULTS.items():
-            if key == "crossfade_fraction" and key in overrides and isinstance(overrides[key], dict):
-                value = {**CROSSFADE_FRACTION, **overrides[key]}
+            if key in _PER_KIND_CROSSFADE_KEYS and key in overrides:
+                provided = overrides[key]
+                if isinstance(provided, dict):
+                    value = {**default, **provided}
+                elif isinstance(provided, (int, float)) and not isinstance(provided, bool):
+                    value = {kind: provided for kind in default}
+                else:
+                    value = default
             else:
                 value = overrides.get(key, default)
             setattr(self, key, value)
@@ -1219,8 +1523,10 @@ def _overlap_len(kind: str, len_a: int, len_b: int, override_ms=None, audio_sett
     fraction = settings.crossfade_fraction.get(kind, 0.0)
     if fraction <= 0:
         return 0
-    lo = int(TARGET_RATE * settings.crossfade_min_ms / 1000)
-    hi = int(TARGET_RATE * settings.crossfade_max_ms / 1000)
+    min_ms = settings.crossfade_min_ms.get(kind, CROSSFADE_MIN_MS.get(kind, 20))
+    max_ms = settings.crossfade_max_ms.get(kind, CROSSFADE_MAX_MS.get(kind, 150))
+    lo = int(TARGET_RATE * min_ms / 1000)
+    hi = int(TARGET_RATE * max_ms / 1000)
     ov = int(shorter * fraction)
     ov = max(lo, ov)           # at least crossfade_min_ms, if the clip allows
     ov = min(ov, hi)           # but no more than crossfade_max_ms
@@ -1265,7 +1571,8 @@ def _crossfade_join(chunks, kind: str, names=None, overrides=None, audio_setting
 
 
 def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossfade=True, speed=1.0,
-                 stop_gap_ms=DEFAULT_STOP_GAP_MS, overrides=None, audio_settings=None):
+                 stop_gap_ms=DEFAULT_STOP_GAP_MS, overrides=None, audio_settings=None,
+                 hex_pieces=False, naming="hex-codepoint"):
     """Concatenate grouped samples (from text_to_groups) into one mono track.
 
     Each group's samples are crossfaded together (see _crossfade_join) rather
@@ -1286,8 +1593,25 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
 
     `overrides` is an optional {sample_name: {gain_db, trim_start_ms,
     trim_end_ms}} dict (see load_overrides/apply_override) for per-sample
-    fine-tuning on top of the automatic pipeline. Not loaded automatically —
-    pass the result of load_overrides(path) explicitly if you want it.
+    fine-tuning on top of the automatic pipeline - keyed by whatever the
+    ACTUAL file is called (see `hex_pieces` below), matching what
+    voice_recorder/gui.py's tuning tab show and save by. Not loaded
+    automatically — pass the result of load_overrides(path) explicitly if
+    you want it.
+
+    `hex_pieces`/`naming`: base pieces (from text_to_groups' tier-3 split)
+    are always constructed as a stable LOGICAL romanized name (e.g. "ga") -
+    `hex_pieces` says whether the file backing that name on disk is that
+    name itself (default) or the hex codepoint of a real character that
+    produces the exact same recording (see piece_filename/
+    PIECE_REPRESENTATIVE_CHARS), letting a bank keep ONE consistent naming
+    scheme across every tier instead of hex-only for dedicated_diphthongs/
+    syllable_overrides and romanized for the base pieces. Every OTHER piece
+    of reasoning here (CODA_TAILS/stop-coda detection, crossfade `kind`)
+    still keys off the logical name - only the file path and override
+    lookups use the translated one. Already-hex names (from tier 1/2) pass
+    through piece_filename unchanged, so this is safe regardless of which
+    tiers a given group came from.
 
     For backwards compatibility, `groups` may also be a flat list of names
     (as text_to_samples returns): each name is then treated as its own
@@ -1307,14 +1631,14 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
     if groups and isinstance(groups[0], str):
         groups = [("single", [name]) for name in groups]
 
-    def load_raw(name):
-        if name not in raw_cache:
-            path = os.path.join(sound_dir, name + ".wav")
-            raw_cache[name] = (
-                read_sample(path, normalize=normalize, override=overrides.get(name), audio_settings=settings)
+    def load_raw(file_name):
+        if file_name not in raw_cache:
+            path = os.path.join(sound_dir, file_name + ".wav")
+            raw_cache[file_name] = (
+                read_sample(path, normalize=normalize, override=overrides.get(file_name), audio_settings=settings)
                 if os.path.exists(path) else None
             )
-        return raw_cache[name]
+        return raw_cache[file_name]
 
     for kind, names in groups:
         if names == [PAUSE]:
@@ -1326,22 +1650,24 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
             track.extend(array.array("h", bytes(int(TARGET_RATE * prev_stop_gap_ms / 1000) * SAMPLE_WIDTH))
                          if prev_stop_gap_ms != stop_gap_ms else stop_gap)
 
+        file_names = [piece_filename(n, hex_pieces, naming) for n in names]
+
         chunks = []
-        for i, name in enumerate(names):
-            raw = load_raw(name)
+        for i, (name, file_name) in enumerate(zip(names, file_names)):
+            raw = load_raw(file_name)
             if raw is None:
-                missing.append(name)
+                missing.append(file_name)
                 continue
             chunk = array.array("h", raw)  # copy: about to be mutated
             if i > 0 and name in CODA_TAILS:  # a batchim, not this syllable's onset
-                coda_max_ms = overrides.get(name, {}).get("coda_max_ms", settings.coda_max_ms)
+                coda_max_ms = overrides.get(file_name, {}).get("coda_max_ms", settings.coda_max_ms)
                 chunk = _shorten_coda(chunk, max_ms=coda_max_ms, fade_ms=settings.coda_tail_fade_ms)
             chunks.append(chunk)
         if not chunks:
             continue
 
         combined = (
-            _crossfade_join(chunks, kind, names, overrides, audio_settings=settings)
+            _crossfade_join(chunks, kind, file_names, overrides, audio_settings=settings)
             if crossfade and len(chunks) > 1
             else chunks[0]
         )
@@ -1353,7 +1679,7 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
             _apply_fade(combined, fade_len)
         track.extend(combined)
         prev_ends_in_stop = _ends_in_stop_coda(names[-1])
-        prev_stop_gap_ms = overrides.get(names[-1], {}).get("stop_gap_ms", stop_gap_ms)
+        prev_stop_gap_ms = overrides.get(file_names[-1], {}).get("stop_gap_ms", stop_gap_ms)
 
     if speed != 1.0:
         track = change_speed(track, speed)
@@ -1365,6 +1691,7 @@ def build_audio_with_fallback(
     gap_ms=300, fade_ms=5, normalize=True, crossfade=True, speed=1.0, stop_gap_ms=None,
     overrides=None, audio_settings=None, naming="hex-codepoint", phonology=None,
     syllable_override_check=None, dedicated_diphthong_check=None, legacy_piece_check=None,
+    hex_pieces=False,
 ):
     """Per-character assembly for a bank that has a `fallback_bank`
     configured. Each composed-and-neutralized character is resolved
@@ -1387,9 +1714,9 @@ def build_audio_with_fallback(
     settings = audio_settings if audio_settings is not None else AudioSettings()
     stop_gap_ms = settings.default_stop_gap_ms if stop_gap_ms is None else stop_gap_ms
     fallback_settings = resolve_audio_settings(fallback_manifest) if fallback_manifest else AudioSettings()
-    fallback_phonology = resolve_phonology_options(
-        (fallback_manifest or {}).get("settings") or {}
-    )
+    fallback_settings_block = (fallback_manifest or {}).get("settings") or {}
+    fallback_phonology = resolve_phonology_options(fallback_settings_block)
+    fallback_hex_pieces = bool(fallback_settings_block.get("hex_pieces"))
 
     track = array.array("h")
     gap = array.array("h", bytes(int(TARGET_RATE * gap_ms / 1000) * SAMPLE_WIDTH))
@@ -1420,6 +1747,7 @@ def build_audio_with_fallback(
         sub_track, sub_missing = build_audio(
             sub_groups, bank_dir, gap_ms=0, fade_ms=fade_ms, normalize=normalize,
             crossfade=crossfade, overrides=overrides, audio_settings=settings,
+            hex_pieces=hex_pieces, naming=naming,
         )
 
         if sub_missing or not len(sub_track):
@@ -1429,6 +1757,7 @@ def build_audio_with_fallback(
                 fb_track, fb_missing = build_audio(
                     fb_groups, fallback_dir, gap_ms=0, fade_ms=fade_ms,
                     normalize=normalize, audio_settings=fallback_settings,
+                    hex_pieces=fallback_hex_pieces, naming=naming,
                 )
                 if not fb_missing and len(fb_track):
                     samples = fb_track
@@ -1468,16 +1797,19 @@ def _exists_check(bank_dir):
     return check
 
 
-def _legacy_piece_check(bank_dir):
+def _legacy_piece_check(bank_dir, hex_pieces=False, naming="hex-codepoint"):
     """The text_to_groups() `legacy_piece_check` closure for synthesize():
     a plain existence check (no ROMANIZED_PIECE_NAMES exclusion - here we
     WANT a match against a known romanized piece name like "ag"/"n", not
-    a hex codepoint, so there's no collision to guard against). A bank
-    with no romanized pieces at all (e.g. a former "diphone"-type bank)
-    correctly gets False for every name, which is what makes
-    text_to_groups() fall through instead of naming a nonexistent file."""
+    a hex codepoint, so there's no collision to guard against) - translated
+    through piece_filename first, same as build_audio(), so this still
+    finds the file on a bank with hex_pieces on. A bank with no romanized
+    pieces at all (e.g. a former "diphone"-type bank) correctly gets False
+    for every name, which is what makes text_to_groups() fall through
+    instead of naming a nonexistent file."""
     def check(name, _dir=bank_dir):
-        return os.path.exists(os.path.join(_dir, name + ".wav"))
+        file_name = piece_filename(name, hex_pieces, naming)
+        return os.path.exists(os.path.join(_dir, file_name + ".wav"))
     return check
 
 
@@ -1526,17 +1858,19 @@ def synthesize(text, sound_root, voice, **kwargs):
 
     phonology = resolve_phonology_options(settings_block)
     naming = settings_block.get("naming", "hex-codepoint")
+    hex_pieces = bool(settings_block.get("hex_pieces"))
 
     dedicated_check = _exists_check(bank_dir) if settings_block.get("dedicated_diphthongs") else None
     override_check = _exists_check(bank_dir) if settings_block.get("syllable_overrides") else None
-    legacy_check = _legacy_piece_check(bank_dir) if dedicated_check is not None else None
+    legacy_check = _legacy_piece_check(bank_dir, hex_pieces, naming) if dedicated_check is not None else None
 
     fallback_name = settings_block.get("fallback_bank")
     if not fallback_name:
         groups = text_to_groups(text, dedicated_diphthong_check=dedicated_check,
                                  syllable_override_check=override_check, naming=naming,
                                  phonology=phonology, legacy_piece_check=legacy_check)
-        return build_audio(groups, bank_dir, audio_settings=audio_settings, **kwargs)
+        return build_audio(groups, bank_dir, audio_settings=audio_settings,
+                            hex_pieces=hex_pieces, naming=naming, **kwargs)
 
     fallback_dir = voice_dir(sound_root, fallback_name)
     fallback_manifest = load_bank_manifest(fallback_dir)
@@ -1544,7 +1878,7 @@ def synthesize(text, sound_root, voice, **kwargs):
         text, bank_dir, fallback_dir=fallback_dir, fallback_manifest=fallback_manifest,
         audio_settings=audio_settings, naming=naming, phonology=phonology,
         syllable_override_check=override_check, dedicated_diphthong_check=dedicated_check,
-        legacy_piece_check=legacy_check, **kwargs,
+        legacy_piece_check=legacy_check, hex_pieces=hex_pieces, **kwargs,
     )
     return samples, missing
 

@@ -89,11 +89,12 @@ goto :eof
 
 :write_voice
 call :get_bank_type "%~1" VTYPE
+call :get_hex_pieces "%~1" VHEX
 if "%FIRST%"=="1" (
     set "FIRST=0"
-    >> "%VOICES_JSON%" echo     {"name": "%~1", "type": "%VTYPE%"}
+    >> "%VOICES_JSON%" echo     {"name": "%~1", "type": "%VTYPE%", "hex_pieces": %VHEX%}
 ) else (
-    >> "%VOICES_JSON%" echo     ,{"name": "%~1", "type": "%VTYPE%"}
+    >> "%VOICES_JSON%" echo     ,{"name": "%~1", "type": "%VTYPE%", "hex_pieces": %VHEX%}
 )
 goto :eof
 
@@ -109,6 +110,18 @@ pushd "%SRC%"
 for /f "usebackq delims=" %%T in (`py -c "import json, os; p = os.path.join(r'%~1', 'bank.json'); d = json.load(open(p, encoding='utf-8')) if os.path.exists(p) else {}; print(d.get('type', 'pieces') if isinstance(d, dict) else 'pieces')" 2^>nul`) do set "GBT_RESULT=%%T"
 popd
 set "%~2=%GBT_RESULT%"
+goto :eof
+
+REM Reads <SRC>\<voice name>\bank.json's "settings.hex_pieces" field
+REM (defaulting to false) - see korean_tts.py's piece_filename()/
+REM PIECE_REPRESENTATIVE_CHARS for what this actually changes (the base
+REM pieces' on-disk names, hex codepoints instead of romanized letters).
+:get_hex_pieces
+set "GHP_RESULT=false"
+pushd "%SRC%"
+for /f "usebackq delims=" %%T in (`py -c "import json, os; p = os.path.join(r'%~1', 'bank.json'); d = json.load(open(p, encoding='utf-8')) if os.path.exists(p) else {}; s = d.get('settings', {}) if isinstance(d, dict) else {}; print('true' if isinstance(s, dict) and s.get('hex_pieces') else 'false')" 2^>nul`) do set "GHP_RESULT=%%T"
+popd
+set "%~2=%GHP_RESULT%"
 goto :eof
 
 :nosrc

@@ -36,7 +36,9 @@ else:
     WRITABLE_DIR = BASE_DIR
 
 SOUND_ROOT = os.path.join(RESOURCE_DIR, "sound")
-OVERRIDES_PATH = os.path.join(WRITABLE_DIR, ktts.DEFAULT_OVERRIDES_FILENAME)
+OVERRIDES_DIR = os.path.join(WRITABLE_DIR, ktts.OVERRIDES_SUBDIR)
+ktts.migrate_legacy_overrides(WRITABLE_DIR, OVERRIDES_DIR)
+OVERRIDES_PATH = os.path.join(OVERRIDES_DIR, ktts.DEFAULT_OVERRIDES_FILENAME)
 SETTINGS_PATH = os.path.join(WRITABLE_DIR, "gui_settings.json")
 
 
@@ -175,6 +177,23 @@ class App(tk.Tk):
 
     def audio_settings(self):
         return ktts.resolve_audio_settings(self.bank_manifest())
+
+    def set_bank_audio_setting(self, key: str, value) -> None:
+        """Merge one key into the current voice's bank.json "audio" block
+        (creating the file if it doesn't exist yet, e.g. sound/narrator2/
+        with no bank.json at all) and save - value=None removes the key
+        instead, reverting to the module-level default. Used by the
+        TuningTab's whole-voice settings (e.g. global crossfade length),
+        which apply regardless of which sample is selected, unlike every
+        other slider in that tab."""
+        manifest = self.bank_manifest()
+        audio = dict(manifest.get("audio") or {})
+        if value is None:
+            audio.pop(key, None)
+        else:
+            audio[key] = value
+        manifest["audio"] = audio
+        ktts.save_bank_manifest(self.current_sound_dir(), manifest)
 
     def set_voice(self, voice: str) -> None:
         """Switch the active voice: persist the outgoing voice's overrides
@@ -440,8 +459,9 @@ class WaveformEditor(tk.Canvas):
 class TuningTab(ttk.Frame):
     """Per-sample overrides, layered on top of the automatic trim+normalize
     pipeline (see korean_tts.apply_override / build_audio). Saved to
-    sound_overrides.json, which tts.py/main.py/this GUI all read the same
-    way, so a fix made here benefits every interface immediately.
+    config/sound_overrides.json (next to the .exe - see OVERRIDES_DIR),
+    which tts.py/main.py/this GUI all read the same way, so a fix made here
+    benefits every interface immediately.
 
     Beyond gain/trim, this also exposes the per-sample join-timing overrides
     build_audio understands (crossfade_ms / coda_max_ms / stop_gap_ms) via
@@ -465,6 +485,20 @@ class TuningTab(ttk.Frame):
         ttk.Entry(top, textvariable=self.search_var).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(top, text="내보내기...", command=self._export).pack(side="left", padx=(8, 0))
         ttk.Button(top, text="가져오기...", command=self._import).pack(side="left", padx=(4, 0))
+
+        # Whole-voice settings (bank.json's "audio" block) - unlike every
+        # other slider in this tab, these apply to ALL of this voice's
+        # samples regardless of which one is selected below, so they live
+        # here rather than in the per-sample "선택한 음성 조각" panel.
+        global_frame = ttk.LabelFrame(self, text="이 목소리 전체 설정")
+        global_frame.pack(fill="x", padx=8, pady=(0, 4))
+        self.global_crossfade_enabled = tk.BooleanVar(value=False)
+        self.global_crossfade_var = tk.DoubleVar(value=150)
+        self._add_optional_slider(
+            global_frame, "전체 최대 교차 길이(ms) - 이 목소리의 모든 이음매에 적용",
+            self.global_crossfade_enabled, self.global_crossfade_var, 20, 300,
+            self._commit_global_crossfade,
+        )
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True, padx=8, pady=4)
@@ -512,8 +546,9 @@ class TuningTab(ttk.Frame):
 
         self.crossfade_enabled = tk.BooleanVar(value=False)
         self.crossfade_var = tk.DoubleVar(value=60)
-        self._add_optional_slider(adv, "교차 길이(ms) - 다음/이전 조각과의 겹침",
-                                   self.crossfade_enabled, self.crossfade_var, 0, 150, self._commit)
+        self.crossfade_scale = self._add_optional_slider(
+            adv, "교차 길이(ms) - 다음/이전 조각과의 겹침",
+            self.crossfade_enabled, self.crossfade_var, 0, 200, self._commit)
 
         self.coda_enabled = tk.BooleanVar(value=False)
         self.coda_var = tk.DoubleVar(value=ktts.CODA_MAX_MS)
@@ -536,7 +571,24 @@ class TuningTab(ttk.Frame):
         self.status_label.pack(anchor="w", padx=8)
 
         self.all_names = self._list_sound_files()
+        self._rebuild_search_keys()
         self._refresh_list()
+        self._load_global_crossfade()
+
+    def _load_global_crossfade(self):
+        """Reflect the current voice's bank.json audio.crossfade_max_ms in
+        the whole-voice slider - on (checked) only if it's already set as
+        a single flat number (what this slider itself writes); a per-kind
+        dict (hand-edited, or never touched) shows as off/default instead
+        of guessing which of the three kinds' values to display."""
+        value = (self.app.bank_manifest().get("audio") or {}).get("crossfade_max_ms")
+        is_flat = isinstance(value, (int, float)) and not isinstance(value, bool)
+        self.global_crossfade_enabled.set(is_flat)
+        self.global_crossfade_var.set(value if is_flat else 150)
+
+    def _commit_global_crossfade(self):
+        value = int(self.global_crossfade_var.get()) if self.global_crossfade_enabled.get() else None
+        self.app.set_bank_audio_setting("crossfade_max_ms", value)
 
     def _add_optional_slider(self, parent, label, enabled_var, value_var, lo, hi, on_change):
         row = ttk.Frame(parent)
@@ -551,7 +603,7 @@ class TuningTab(ttk.Frame):
         ttk.Label(row, textvariable=text_var, wraplength=260).pack(side="left", padx=4)
         scale = ttk.Scale(row, from_=lo, to=hi, orient="horizontal", variable=value_var, command=sync, length=300)
         scale.pack(fill="x", padx=4, pady=(2, 4))
-        return text_var
+        return scale
 
     def _list_sound_files(self) -> list:
         sound_dir = self.app.current_sound_dir()
@@ -562,10 +614,17 @@ class TuningTab(ttk.Frame):
     def _refresh_list(self):
         query = self.search_var.get().strip().lower()
         self.listbox.delete(0, "end")
-        self.filtered = [n for n in self.all_names if query in n.lower()] if query else self.all_names
+        # Matches by hex filename, romanized reading, OR the real Hangul
+        # character (see korean_tts.search_key) - keyed once per voice
+        # load (_rebuild_search_keys), not recomputed on every keystroke.
+        self.filtered = [n for n in self.all_names if query in self._search_keys.get(n, n.lower())] \
+            if query else self.all_names
         for name in self.filtered:
             marker = " *" if name in self.app.overrides else ""
             self.listbox.insert("end", name + marker)
+
+    def _rebuild_search_keys(self):
+        self._search_keys = {n: ktts.search_key(n) for n in self.all_names}
 
     def on_voice_changed(self):
         """Called by App.set_voice(): this tab's file list, cached raw
@@ -577,7 +636,9 @@ class TuningTab(ttk.Frame):
         self.waveform.peaks = []
         self.waveform.redraw()
         self.all_names = self._list_sound_files()
+        self._rebuild_search_keys()
         self._refresh_list()
+        self._load_global_crossfade()
 
     def _load_raw(self, name):
         if name not in self._raw_cache:
@@ -601,7 +662,6 @@ class TuningTab(ttk.Frame):
         self.trim_end_var.set(override.get("trim_end_ms", 0.0))
 
         self.crossfade_enabled.set("crossfade_ms" in override)
-        self.crossfade_var.set(override.get("crossfade_ms", 60))
         self.coda_enabled.set("coda_max_ms" in override)
         self.coda_var.set(override.get("coda_max_ms", ktts.CODA_MAX_MS))
         self.stopgap_enabled.set("stop_gap_ms" in override)
@@ -610,6 +670,16 @@ class TuningTab(ttk.Frame):
         self._sync_labels()
 
         raw = self._load_raw(name)
+
+        # Crossfade can never exceed this clip's own length anyway (build_
+        # audio's _overlap_len already clamps to shorter-1), so cap the
+        # slider itself at min(200ms, this file's duration) instead of
+        # letting the user pick a value that's silently reduced later.
+        duration_ms = (len(raw) / ktts.TARGET_RATE * 1000) if raw else 0
+        crossfade_max = max(0, min(200, int(duration_ms)))
+        self.crossfade_scale.config(to=crossfade_max)
+        self.crossfade_var.set(min(override.get("crossfade_ms", 60), crossfade_max))
+
         if raw is not None:
             self.waveform.load(raw)
             self.waveform.set_trim(self.trim_start_var.get(), self.trim_end_var.get())

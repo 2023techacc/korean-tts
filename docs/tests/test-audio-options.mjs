@@ -34,7 +34,10 @@ const groups = textToGroups(ref.phrase);
 let failures = 0;
 for (const [key, opts] of Object.entries(optionsFor)) {
   const expected = ref.configs[key];
-  const { samples, missing } = await buildAudio(groups, loadSampleBuffer, opts);
+  // sound/default is hex_pieces (see korean_tts.py's piece_filename) -
+  // buildAudio() translates internally, so loadSampleBuffer above stays
+  // untranslated.
+  const { samples, missing } = await buildAudio(groups, loadSampleBuffer, { hexPieces: true, ...opts });
   const got = Array.from(samples);
   const ok = arraysEqual(got, expected.samples) && JSON.stringify(missing) === JSON.stringify(expected.missing);
   if (!ok) {

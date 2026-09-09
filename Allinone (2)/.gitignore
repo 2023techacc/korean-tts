@@ -26,6 +26,9 @@ VoiceRecorder.exe
 build_temp/
 *.spec
 
-# Per-machine GUI window state (last-used sliders etc.), not shared config -
-# sound_overrides.json (the actual fine-tuning data) IS tracked on purpose.
+# Per-machine state: GUI window settings, and the per-sample fine-tuning
+# overrides gui.py's "고급 설정" tab saves (now under config/, not the top
+# level - see korean_tts.OVERRIDES_SUBDIR/migrate_legacy_overrides). Both
+# are local tuning data, not shared/versioned project config.
 gui_settings.json
+config/
