@@ -84,7 +84,25 @@ goto :eof
 if /i "%~n1"=="default" goto :eof
 dir /a-d "%~1\*.wav" >nul 2>&1
 if errorlevel 1 goto :eof
+REM Skip a voice git doesn't actually have committed - listing it in
+REM voices.json would offer it in the live web page's dropdown while its
+REM files 404, since GitHub Pages only ever serves what's pushed. A local-
+REM only/WIP voice (recorded but never `git add`ed) stays fully usable in
+REM the CLI/desktop app either way - this only affects the web listing.
+call :is_tracked "%~n1" VTRACKED
+if not "%VTRACKED%"=="1" goto :eof
 call :write_voice "%~n1"
+goto :eof
+
+REM True iff at least one file under Allinone (2)\sound\<name> is tracked
+REM in git - see the comment above maybe_write_voice for why this matters.
+:is_tracked
+set "IT_RESULT=0"
+pushd "%ROOT%"
+git ls-files --error-unmatch "Allinone (2)/sound/%~1" >nul 2>&1
+if not errorlevel 1 set "IT_RESULT=1"
+popd
+set "%~2=%IT_RESULT%"
 goto :eof
 
 :write_voice

@@ -565,6 +565,26 @@ def text_to_pronunciation(text: str) -> str:
     return "".join(out)
 
 
+def syllable_position_chars(text: str, phonology=None) -> list:
+    """The composed (post-liaison) character for each real syllable in
+    `text`, in order, skipping pauses/unspeakable characters entirely - so
+    index i here is exactly the syllable that a `position_overrides={i:
+    ...}` entry (see build_audio()/build_audio_with_fallback()) affects,
+    regardless of which of the two build functions a given voice actually
+    uses. Used by gui.py's position-specific tuning panel to show the user
+    which character each position slider controls.
+    """
+    out = []
+    for s in _parse_and_apply_rules(text, phonology):
+        if not isinstance(s, list):
+            continue
+        cho, jung, jong = s
+        if jong in CONSONANTS:
+            jong = FINAL_MAP.get(jong, jong)
+        out.append(_compose(cho, jung, jong))
+    return out
+
+
 def _syllable_to_jamo(cho, jung, jong, phonology=None):
     """(cho, jung, jong) -> flat jamo list, applying batchim neutralisation
     (only relevant if liaison above didn't already resolve/move it) and
@@ -907,6 +927,24 @@ def piece_filename(name: str, hex_pieces: bool, naming: str = "hex-codepoint") -
     return base + "_tail" if name in CODA_TAILS else base
 
 
+def _hex_to_romanized_names() -> dict:
+    """Reverse of piece_filename(name, hex_pieces=True, "hex-codepoint") -
+    maps the hex (or "_tail"-suffixed hex) filename a hex_pieces bank's
+    base piece actually uses back to the LOGICAL romanized name it
+    represents. Needed anywhere something has to recover a hex_pieces
+    bank's file's phonological ROLE from just its on-disk name - e.g.
+    "does this piece end in a stop coda, so stop_gap_ms would apply to
+    it" (see _ends_in_stop_coda/CODA_TAILS, both of which key off the
+    logical name, never the translated one) - gui.py's join-timing
+    preview is the first caller."""
+    return {piece_filename(name, True): name for name in PIECE_REPRESENTATIVE_CHARS}
+
+
+# Computed further down, right after CODA_TAILS - piece_filename() (used by
+# _hex_to_romanized_names above) needs that set defined first, and it isn't
+# yet at this point in the file.
+
+
 # Standard-ish Revised Romanization for the 7 compound vowels, used only by
 # search_key() below - distinct from ROMAN, which has no single-string
 # entry for these at all (the piece-splitting scheme always represents a
@@ -1042,6 +1080,76 @@ def trim_silence(samples: array.array, threshold: int = SILENCE_THRESHOLD) -> ar
     while end > start and abs(samples[end - 1]) < threshold:
         end -= 1
     return samples[start:end]
+
+
+def trim_silence_smart(samples: array.array, window_ms: float = 10,
+                        threshold: int = SILENCE_THRESHOLD) -> array.array:
+    """A more robust alternative to trim_silence() for a recording whose
+    edges aren't digitally silent but aren't real content either - room
+    tone, mic hiss, a trailing breath. trim_silence() checks one sample at
+    a time against `threshold`; a handful of samples in an otherwise-quiet
+    tail poking just above that is enough to stop it from trimming
+    through (verified case: sound/diphault's 찌 recording has real vowel
+    energy ending ~220ms in, then a trailing ~200ms tail whose windowed
+    RMS is single digits - clearly dead air - that trim_silence() still
+    left untouched because a few individual samples in there exceed 250,
+    landing dedicated_diphthongs' crossfade window on that dead air
+    instead of the vowel).
+
+    This uses the SAME threshold, just checked as an RMS average over
+    `window_ms` windows instead of one sample at a time - an isolated
+    spike surrounded by quiet no longer moves the boundary, but a
+    recording that's genuinely, gradually decaying (a natural vowel
+    trailing off, still well above the noise floor throughout) is left
+    alone exactly like trim_silence() already leaves it - verified this
+    does NOT touch sound/default's 아/가 (still comfortably above 250 in
+    RMS at the point trim_silence() already stops) while it DOES continue
+    trimming 찌's actual dead air (RMS in the single digits there). An
+    earlier version of this used a threshold relative to the clip's own
+    peak instead - rejected after finding it cut ~90ms off the natural,
+    legitimate decay tail of sound/default's 아, which was never the
+    problem being solved.
+
+    Deliberately NOT used by the automatic pipeline (read_sample() still
+    calls plain trim_silence()) - windowed detection is still a
+    DIFFERENT (if more robust) judgment call than the pipeline's existing
+    one, and hasn't been checked against every recording in every bank.
+    Exposed instead as an opt-in tool (see gui.py/voice_recorder.py's
+    "실제 무음 자르기") for fixing a specific recording found to have this
+    problem, same opt-in spirit as normalize_loudness's manual "정규화"
+    button. Returns `samples` unchanged if nothing clears the threshold
+    anywhere, rather than emptying a clip that's quiet throughout."""
+    start, end = smart_trim_bounds(samples, window_ms, threshold)
+    return samples[start:end]
+
+
+def smart_trim_bounds(samples: array.array, window_ms: float = 10,
+                       threshold: int = SILENCE_THRESHOLD) -> tuple:
+    """(start, end) sample indices trim_silence_smart() would cut to -
+    factored out so a caller that needs the exact ms trimmed from each
+    side (gui.py's tuning tab, to pre-fill its existing trim_start_ms/
+    trim_end_ms slider overrides rather than rewrite the file) doesn't
+    have to re-derive it from a length difference. (0, len(samples)) if
+    nothing ever clears the threshold."""
+    n = len(samples)
+    if not n:
+        return 0, 0
+    window = max(1, int(TARGET_RATE * window_ms / 1000))
+
+    def window_rms(i):
+        chunk = samples[i:min(i + window, n)]
+        return math.sqrt(sum(x * x for x in chunk) / len(chunk))
+
+    start = 0
+    while start < n and window_rms(start) < threshold:
+        start += window
+    if start >= n:
+        return 0, n
+
+    end = n
+    while end > start and window_rms(max(start, end - window)) < threshold:
+        end -= window
+    return start, end
 
 
 def normalize_loudness(
@@ -1421,6 +1529,10 @@ CODA_TAILS = {"n", "l", "m", "ng"}
 CODA_MAX_MS = 120
 CODA_TAIL_FADE_MS = 20
 
+# See _hex_to_romanized_names()'s docstring - deferred to here since it
+# needs CODA_TAILS (just above) already defined.
+HEX_TO_ROMANIZED_NAME = _hex_to_romanized_names()
+
 # Closed syllables ending in an unreleased obstruent stop (represented ㄱ/ㄷ/
 # ㅂ after 음절의 끝소리 규칙 — this covers ㅋ/ㄲ, ㅅ/ㅆ/ㅈ/ㅊ/ㅌ/ㅎ, ㅍ too,
 # all neutralised to one of these three) run straight into the next
@@ -1572,7 +1684,7 @@ def _crossfade_join(chunks, kind: str, names=None, overrides=None, audio_setting
 
 def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossfade=True, speed=1.0,
                  stop_gap_ms=DEFAULT_STOP_GAP_MS, overrides=None, audio_settings=None,
-                 hex_pieces=False, naming="hex-codepoint"):
+                 hex_pieces=False, naming="hex-codepoint", position_overrides=None):
     """Concatenate grouped samples (from text_to_groups) into one mono track.
 
     Each group's samples are crossfaded together (see _crossfade_join) rather
@@ -1613,6 +1725,22 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
     through piece_filename unchanged, so this is safe regardless of which
     tiers a given group came from.
 
+    `position_overrides` is an optional {syllable_index: {gain_db,
+    trim_start_ms, trim_end_ms, crossfade_ms, coda_max_ms, stop_gap_ms}}
+    dict - the same shape/keys as a per-sample entry in `overrides`, but
+    applied to only the ONE occurrence at that index in `groups` (PAUSE
+    groups don't count, so index 0 is the first real syllable, matching
+    how a person reading the text would count them, not the raw character
+    offset) rather than every occurrence of whatever file that syllable
+    happens to use elsewhere. Merged on top of (takes precedence over) any
+    per-sample entry in `overrides` for that syllable's own piece(s), and
+    only for that one syllable - a different occurrence of the exact same
+    underlying file, or the same file used by a completely different bank
+    call, is never affected. This is what gui.py's "위치별 세부 조정" panel
+    writes; it has no on-disk representation of its own (never saved to a
+    sound_overrides.json - it's meaningful only for the specific text it
+    was set against).
+
     For backwards compatibility, `groups` may also be a flat list of names
     (as text_to_samples returns): each name is then treated as its own
     'single' group, with no crossfading.
@@ -1627,15 +1755,21 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
     prev_ends_in_stop = False
     prev_stop_gap_ms = stop_gap_ms
     overrides = overrides or {}
+    position_overrides = position_overrides or {}
+    syllable_index = 0
 
     if groups and isinstance(groups[0], str):
         groups = [("single", [name]) for name in groups]
 
-    def load_raw(file_name):
+    def load_raw(file_name, override, use_cache):
+        if not use_cache:
+            path = os.path.join(sound_dir, file_name + ".wav")
+            return read_sample(path, normalize=normalize, override=override, audio_settings=settings) \
+                if os.path.exists(path) else None
         if file_name not in raw_cache:
             path = os.path.join(sound_dir, file_name + ".wav")
             raw_cache[file_name] = (
-                read_sample(path, normalize=normalize, override=overrides.get(file_name), audio_settings=settings)
+                read_sample(path, normalize=normalize, override=override, audio_settings=settings)
                 if os.path.exists(path) else None
             )
         return raw_cache[file_name]
@@ -1652,22 +1786,37 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
 
         file_names = [piece_filename(n, hex_pieces, naming) for n in names]
 
+        # A position override applies to every piece THIS syllable's own
+        # assembly uses, merged on top of (winning over) that piece's own
+        # file-level entry - built once per syllable so every lookup below
+        # (gain/trim, crossfade, coda shortening, stop-gap) sees it without
+        # needing five separate injection points. Falls back to `overrides`
+        # itself (no copy, no cache bypass) for the overwhelming common
+        # case of a syllable with no position override at all.
+        pos_override = position_overrides.get(syllable_index)
+        group_overrides = overrides
+        if pos_override:
+            group_overrides = dict(overrides)
+            for fn in set(file_names):
+                group_overrides[fn] = {**overrides.get(fn, {}), **pos_override}
+        syllable_index += 1
+
         chunks = []
         for i, (name, file_name) in enumerate(zip(names, file_names)):
-            raw = load_raw(file_name)
+            raw = load_raw(file_name, group_overrides.get(file_name), use_cache=pos_override is None)
             if raw is None:
                 missing.append(file_name)
                 continue
             chunk = array.array("h", raw)  # copy: about to be mutated
             if i > 0 and name in CODA_TAILS:  # a batchim, not this syllable's onset
-                coda_max_ms = overrides.get(file_name, {}).get("coda_max_ms", settings.coda_max_ms)
+                coda_max_ms = group_overrides.get(file_name, {}).get("coda_max_ms", settings.coda_max_ms)
                 chunk = _shorten_coda(chunk, max_ms=coda_max_ms, fade_ms=settings.coda_tail_fade_ms)
             chunks.append(chunk)
         if not chunks:
             continue
 
         combined = (
-            _crossfade_join(chunks, kind, file_names, overrides, audio_settings=settings)
+            _crossfade_join(chunks, kind, file_names, group_overrides, audio_settings=settings)
             if crossfade and len(chunks) > 1
             else chunks[0]
         )
@@ -1679,7 +1828,7 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
             _apply_fade(combined, fade_len)
         track.extend(combined)
         prev_ends_in_stop = _ends_in_stop_coda(names[-1])
-        prev_stop_gap_ms = overrides.get(file_names[-1], {}).get("stop_gap_ms", stop_gap_ms)
+        prev_stop_gap_ms = group_overrides.get(file_names[-1], {}).get("stop_gap_ms", stop_gap_ms)
 
     if speed != 1.0:
         track = change_speed(track, speed)
@@ -1691,7 +1840,7 @@ def build_audio_with_fallback(
     gap_ms=300, fade_ms=5, normalize=True, crossfade=True, speed=1.0, stop_gap_ms=None,
     overrides=None, audio_settings=None, naming="hex-codepoint", phonology=None,
     syllable_override_check=None, dedicated_diphthong_check=None, legacy_piece_check=None,
-    hex_pieces=False,
+    hex_pieces=False, position_overrides=None,
 ):
     """Per-character assembly for a bank that has a `fallback_bank`
     configured. Each composed-and-neutralized character is resolved
@@ -1705,6 +1854,15 @@ def build_audio_with_fallback(
     Liaison/assimilation runs first (_parse_and_apply_rules, the same step
     text_to_pronunciation uses) so the CORRECTED syllable is looked up -
     e.g. 옷이 looks up 오 then 시, not 옷 then 이.
+
+    `position_overrides`: see build_audio()'s docstring - the same
+    {syllable_index: {...}} shape, indexed by real (non-pause) syllable
+    position in `text`. Since this function assembles one character at a
+    time via its own build_audio() sub-call, the global index is remapped
+    to a single-entry {0: ...} dict on whichever sub-call covers that
+    character - a position override never survives a fallback hop (the
+    fallback bank's files aren't what the override's keys were written
+    for), matching how `overrides` itself is already primary-bank-only.
 
     Returns (samples, missing, fallback_used): `missing` lists characters
     found nowhere (this bank or its fallback), `fallback_used` lists
@@ -1724,7 +1882,10 @@ def build_audio_with_fallback(
     missing = []
     fallback_used = []
     prev_ends_in_stop = False
+    prev_stop_gap_ms = stop_gap_ms
     pending_pause = False
+    position_overrides = position_overrides or {}
+    syllable_index = 0
 
     for slot in _parse_and_apply_rules(text, phonology):
         if not isinstance(slot, list):
@@ -1739,6 +1900,9 @@ def build_audio_with_fallback(
         norm_jong = FINAL_MAP.get(jong, jong) if jong in CONSONANTS else jong
         ch = _compose(cho, jung, norm_jong)
 
+        pos_override = position_overrides.get(syllable_index)
+        syllable_index += 1
+
         sub_groups = text_to_groups(
             ch, syllable_override_check=syllable_override_check,
             dedicated_diphthong_check=dedicated_diphthong_check, naming=naming, phonology=phonology,
@@ -1748,7 +1912,27 @@ def build_audio_with_fallback(
             sub_groups, bank_dir, gap_ms=0, fade_ms=fade_ms, normalize=normalize,
             crossfade=crossfade, overrides=overrides, audio_settings=settings,
             hex_pieces=hex_pieces, naming=naming,
+            position_overrides={0: pos_override} if pos_override else None,
         )
+
+        # A per-sample stop_gap_ms override on the LAST piece THIS
+        # syllable's own assembly ends with should win here too, matching
+        # build_audio()'s own per-group behavior - previously this always
+        # used the flat stop_gap_ms parameter, silently ignoring any such
+        # override for a bank with fallback_bank configured (the whole
+        # reason this function exists instead of build_audio() alone).
+        # Only meaningful when the PRIMARY bank's own samples were used -
+        # `overrides` is that bank's overrides file, not the fallback's,
+        # so it isn't a fallback-served syllable's file names either way.
+        # A position override on this syllable wins here too, same as it
+        # would inside build_audio()'s own group loop.
+        this_stop_gap_ms = stop_gap_ms
+        if sub_groups and (overrides or pos_override):
+            last_name = sub_groups[-1][1][-1]
+            last_file_name = piece_filename(last_name, hex_pieces, naming)
+            this_stop_gap_ms = (overrides or {}).get(last_file_name, {}).get("stop_gap_ms", stop_gap_ms)
+            if pos_override and "stop_gap_ms" in pos_override:
+                this_stop_gap_ms = pos_override["stop_gap_ms"]
 
         if sub_missing or not len(sub_track):
             samples = None
@@ -1762,21 +1946,25 @@ def build_audio_with_fallback(
                 if not fb_missing and len(fb_track):
                     samples = fb_track
                     fallback_used.append(ch)
+                    this_stop_gap_ms = stop_gap_ms  # fallback samples: no per-sample override to apply
             if samples is None:
                 missing.append(ch)
         else:
             samples = sub_track
 
         if samples is not None and len(samples):
-            if prev_ends_in_stop and stop_gap_ms:
-                track.extend(stop_gap)
+            if prev_ends_in_stop and prev_stop_gap_ms:
+                track.extend(array.array("h", bytes(int(TARGET_RATE * prev_stop_gap_ms / 1000) * SAMPLE_WIDTH))
+                             if prev_stop_gap_ms != stop_gap_ms else stop_gap)
             # `samples` already went through build_audio() above (primary
             # or fallback), which already applies its own edge fade per
             # group - re-fading here would fade the edges twice.
             track.extend(samples)
             prev_ends_in_stop = norm_jong in {"ㄱ", "ㄷ", "ㅂ"}
+            prev_stop_gap_ms = this_stop_gap_ms
         else:
             prev_ends_in_stop = False
+            prev_stop_gap_ms = stop_gap_ms
 
     if speed != 1.0:
         track = change_speed(track, speed)

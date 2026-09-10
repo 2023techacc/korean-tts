@@ -829,6 +829,7 @@ class App(tk.Tk):
         btns2.pack(fill="x", padx=8, pady=(2, 8))
         ttk.Button(btns2, text="적용 (파일에 저장)", command=self._apply_edit).pack(side="left")
         ttk.Button(btns2, text="정규화 (자동 음량 맞춤)", command=self._normalize_now).pack(side="left", padx=8)
+        ttk.Button(btns2, text="실제 무음 자르기 (자동 감지)", command=self._smart_trim_now).pack(side="left", padx=8)
         ttk.Button(btns2, text="되돌리기 (원본 복원)", command=self._revert_edit).pack(side="left", padx=8)
 
         self.edit_status_label = ttk.Label(frame, text="", foreground="#888", wraplength=440, justify="left")
@@ -1018,6 +1019,44 @@ class App(tk.Tk):
 
         self.edit_status_label.config(
             text=f"'{name}.wav'의 음량을 자동으로 맞춰 저장했습니다 (원본은 {name}.orig 로 보관됨)."
+        )
+        self._refresh_edit_panel()
+
+    def _smart_trim_now(self):
+        """One-click 'find and cut the REAL silence' - korean_tts.
+        trim_silence_smart() (a windowed-RMS re-check, catches a quiet-
+        but-not-actually-silent tail/head - room tone, a trailing breath -
+        that the automatic per-sample trim left in place because a few
+        individual samples in there poke just above the threshold; see
+        that function's docstring for the real recording this was built
+        to fix). Applied once and saved, through the same backup-then-
+        overwrite safety net as _apply_edit/_normalize_now. Only ever
+        trims further than what's already there - if nothing clears the
+        threshold check, nothing is changed or saved."""
+        if not hasattr(self, "voice_dir") or not self.names:
+            return
+        name = self._current_name()
+        path = os.path.join(self.voice_dir, name + ".wav")
+        if not os.path.exists(path):
+            messagebox.showinfo("한국어 TTS", "이 항목은 아직 녹음되지 않았습니다.")
+            return
+
+        try:
+            raw = ktts.read_sample(path, normalize=False, trim=False)
+        except Exception as e:
+            messagebox.showerror("한국어 TTS", f"읽기 실패: {e}")
+            return
+        trimmed = ktts.trim_silence_smart(array.array("h", raw))
+        if len(trimmed) == len(raw):
+            messagebox.showinfo("한국어 TTS", "잘라낼 만한 무음이 감지되지 않았습니다.")
+            return
+
+        if not self._backup_and_overwrite(path, trimmed):
+            return
+
+        cut_ms = (len(raw) - len(trimmed)) / ktts.TARGET_RATE * 1000
+        self.edit_status_label.config(
+            text=f"'{name}.wav'에서 무음 {cut_ms:.0f}ms를 잘라 저장했습니다 (원본은 {name}.orig 로 보관됨)."
         )
         self._refresh_edit_panel()
 

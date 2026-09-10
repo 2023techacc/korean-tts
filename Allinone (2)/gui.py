@@ -220,6 +220,8 @@ class MainTab(ttk.Frame):
         super().__init__(parent)
         self.app = app
         self._last_track = None  # last built samples, for :save-equivalent without rebuilding
+        self.position_overrides = {}  # {syllable index in current text: {gain_db, ...}} - session-only, see on_position_overrides
+        self._position_overrides_text = None  # the text position_overrides was built against - see _build
 
         ttk.Label(self, text="읽을 한국어를 입력하세요").pack(anchor="w", padx=8, pady=(8, 0))
         self.text_box = tk.Text(self, height=5, wrap="word")
@@ -231,6 +233,7 @@ class MainTab(ttk.Frame):
         ttk.Button(btn_row, text="정지", command=self.app.player.stop).pack(side="left", padx=4)
         ttk.Button(btn_row, text="발음 보기", command=self.on_show_pronunciation).pack(side="left", padx=4)
         ttk.Button(btn_row, text="WAV로 저장", command=self.on_save).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="위치별 세부 조정", command=self.on_position_overrides).pack(side="left", padx=4)
 
         self.pron_label = ttk.Label(self, text="", wraplength=600, foreground="#555")
         self.pron_label.pack(anchor="w", padx=8, pady=(0, 8))
@@ -288,13 +291,187 @@ class MainTab(ttk.Frame):
         self.pron_label.config(text=f"발음: {ktts.text_to_pronunciation(text)}")
 
     def _build(self, text: str):
+        # position_overrides is keyed by syllable index in the EXACT text it
+        # was set up against (see on_position_overrides) - if the text box
+        # has since been edited, those indices may no longer point at the
+        # syllables the user actually adjusted, so they're silently not
+        # applied rather than risk hitting the wrong syllable. Reopening
+        # "위치별 세부 조정" against the new text re-establishes them.
+        position_overrides = (
+            self.position_overrides
+            if self.position_overrides and self._position_overrides_text == text
+            else None
+        )
         return ktts.synthesize(
             text, SOUND_ROOT, self.app.settings["voice"],
             gap_ms=int(self.app.settings["gap_ms"]),
             stop_gap_ms=int(self.app.settings["stop_gap_ms"]),
             speed=self.app.settings["speed"],
             overrides=self.app.overrides,
+            position_overrides=position_overrides,
         )
+
+    def on_position_overrides(self):
+        """Opens a dialog to adjust one specific OCCURRENCE of a syllable
+        in the current text - e.g. only the second '가' in '가나가', not
+        every '가' anywhere (that's what the 고급 설정 tab's per-file
+        overrides already do). Session-only: never written to
+        sound_overrides.json, and only meaningful for the exact text it
+        was set up against (see _build)."""
+        text = self.current_text()
+        if not text:
+            messagebox.showinfo("한국어 TTS", "먼저 읽을 문장을 입력하세요.")
+            return
+        settings_block = ktts._migrate_legacy_type(self.app.bank_manifest())
+        phonology = ktts.resolve_phonology_options(settings_block)
+        chars = ktts.syllable_position_chars(text, phonology=phonology)
+        if not chars:
+            messagebox.showinfo("한국어 TTS", "조정할 음절이 없습니다.")
+            return
+        if self._position_overrides_text != text:
+            # Text changed since these were last set - stale indices, drop them.
+            self.position_overrides = {}
+        self._position_overrides_text = text
+        self._open_position_dialog(chars)
+
+    def _open_position_dialog(self, chars):
+        win = tk.Toplevel(self)
+        win.title("위치별 세부 조정")
+        win.geometry("560x420")
+        win.transient(self)
+
+        ttk.Label(
+            win, foreground="#555", wraplength=520,
+            text="목록에서 음절을 골라 그 위치에만 적용될 조정을 합니다. "
+                 "같은 글자가 문장 다른 곳에 또 나와도 영향 없습니다. "
+                 "문장을 수정하면 이 조정은 다시 확인이 필요합니다 (저장되지 않음).",
+        ).pack(anchor="w", padx=8, pady=(8, 4))
+
+        body = ttk.Frame(win)
+        body.pack(fill="both", expand=True, padx=8, pady=4)
+
+        listbox = tk.Listbox(body, width=14, exportselection=False)
+        listbox.pack(side="left", fill="y")
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=listbox.yview)
+        scrollbar.pack(side="left", fill="y")
+        listbox.config(yscrollcommand=scrollbar.set)
+
+        def label_for(i):
+            marker = " *" if i in self.position_overrides else ""
+            return f"{i}: {chars[i]}{marker}"
+
+        for i in range(len(chars)):
+            listbox.insert("end", label_for(i))
+
+        detail = ttk.Frame(body)
+        detail.pack(side="left", fill="both", expand=True, padx=(12, 0))
+
+        gain_var = tk.DoubleVar(value=0.0)
+        gain_text = tk.StringVar()
+        crossfade_enabled = tk.BooleanVar(value=False)
+        crossfade_var = tk.DoubleVar(value=60)
+        coda_enabled = tk.BooleanVar(value=False)
+        coda_var = tk.DoubleVar(value=ktts.CODA_MAX_MS)
+        stopgap_enabled = tk.BooleanVar(value=False)
+        stopgap_var = tk.DoubleVar(value=ktts.DEFAULT_STOP_GAP_MS)
+        current_index = {"i": None}
+
+        def sync_labels():
+            gain_text.set(f"음량 보정: {gain_var.get():+.1f}dB")
+
+        def current_override():
+            override = {}
+            gain = round(gain_var.get(), 1)
+            if gain:
+                override["gain_db"] = gain
+            if crossfade_enabled.get():
+                override["crossfade_ms"] = int(crossfade_var.get())
+            if coda_enabled.get():
+                override["coda_max_ms"] = int(coda_var.get())
+            if stopgap_enabled.get():
+                override["stop_gap_ms"] = int(stopgap_var.get())
+            return override
+
+        def refresh_marker(i):
+            listbox.delete(i)
+            listbox.insert(i, label_for(i))
+            listbox.selection_set(i)
+
+        def commit():
+            i = current_index["i"]
+            if i is None:
+                return
+            override = current_override()
+            if override:
+                self.position_overrides[i] = override
+            else:
+                self.position_overrides.pop(i, None)
+            refresh_marker(i)
+
+        def on_select(_evt=None):
+            selection = listbox.curselection()
+            if not selection:
+                return
+            i = selection[0]
+            current_index["i"] = i
+            override = self.position_overrides.get(i, {})
+            gain_var.set(override.get("gain_db", 0.0))
+            crossfade_enabled.set("crossfade_ms" in override)
+            crossfade_var.set(override.get("crossfade_ms", 60))
+            coda_enabled.set("coda_max_ms" in override)
+            coda_var.set(override.get("coda_max_ms", ktts.CODA_MAX_MS))
+            stopgap_enabled.set("stop_gap_ms" in override)
+            stopgap_var.set(override.get("stop_gap_ms", ktts.DEFAULT_STOP_GAP_MS))
+            sync_labels()
+
+        listbox.bind("<<ListboxSelect>>", on_select)
+
+        ttk.Label(detail, textvariable=gain_text).pack(anchor="w")
+        ttk.Scale(detail, from_=-12, to=12, orient="horizontal", variable=gain_var,
+                  command=lambda _v: (sync_labels(), commit())).pack(fill="x", pady=(0, 10))
+
+        def add_optional(label, enabled_var, value_var, lo, hi):
+            row = ttk.Frame(detail)
+            row.pack(fill="x", pady=2)
+            text_var = tk.StringVar(value=f"{label}: {int(value_var.get())}ms")
+
+            def sync(_evt=None):
+                text_var.set(f"{label}: {int(value_var.get())}ms")
+                commit()
+
+            ttk.Checkbutton(row, variable=enabled_var, command=sync).pack(side="left")
+            ttk.Label(row, textvariable=text_var, width=22).pack(side="left")
+            ttk.Scale(row, from_=lo, to=hi, orient="horizontal", variable=value_var,
+                      command=sync).pack(side="left", fill="x", expand=True, padx=4)
+
+        add_optional("교차 길이", crossfade_enabled, crossfade_var, 0, 200)
+        add_optional("받침 유지 길이", coda_enabled, coda_var, 0, 300)
+        add_optional("받침 ㄱㄷㅂ 뒤 간격", stopgap_enabled, stopgap_var, 0, 200)
+
+        btns = ttk.Frame(win)
+        btns.pack(fill="x", padx=8, pady=8)
+
+        def reset_this():
+            i = current_index["i"]
+            if i is None:
+                return
+            self.position_overrides.pop(i, None)
+            refresh_marker(i)
+            on_select()
+
+        def reset_all():
+            self.position_overrides.clear()
+            for i in range(len(chars)):
+                listbox.delete(i)
+                listbox.insert(i, label_for(i))
+            current_index["i"] = None
+
+        ttk.Button(btns, text="이 위치 초기화", command=reset_this).pack(side="left")
+        ttk.Button(btns, text="전체 초기화", command=reset_all).pack(side="left", padx=8)
+        ttk.Button(btns, text="닫기", command=win.destroy).pack(side="right")
+
+        listbox.selection_set(0)
+        on_select()
 
     def on_play(self):
         text = self.current_text()
@@ -543,6 +720,12 @@ class TuningTab(ttk.Frame):
 
         adv = ttk.LabelFrame(detail, text="고급: 이 조각이 관여하는 이음매 타이밍")
         adv.pack(fill="x", padx=8, pady=(8, 4))
+        ttk.Label(
+            adv, foreground="#888", wraplength=380,
+            text="이 세 설정은 다른 조각과 이어붙일 때만 효과가 있어서 "
+                 "'▶ 조정본 미리듣기'(이 조각 하나만 재생)로는 절대 확인할 수 "
+                 "없습니다 - 아래 '▶ 이음매 효과 미리듣기'를 쓰세요.",
+        ).pack(anchor="w", padx=4, pady=(0, 4))
 
         self.crossfade_enabled = tk.BooleanVar(value=False)
         self.crossfade_var = tk.DoubleVar(value=60)
@@ -564,7 +747,9 @@ class TuningTab(ttk.Frame):
         btns.pack(fill="x", padx=8, pady=8)
         ttk.Button(btns, text="▶ 조정본 미리듣기", command=self._preview).pack(side="left")
         ttk.Button(btns, text="▶ 원본 미리듣기", command=self._preview_original).pack(side="left", padx=8)
+        ttk.Button(btns, text="▶ 이음매 효과 미리듣기", command=self._preview_join_timing).pack(side="left", padx=8)
         ttk.Button(btns, text="초기화", command=self._reset).pack(side="left", padx=8)
+        ttk.Button(btns, text="실제 무음 자르기 (자동 감지)", command=self._suggest_smart_trim).pack(side="left", padx=8)
 
         ttk.Button(detail, text="모든 변경사항 저장", command=self._save_all).pack(anchor="w", padx=8, pady=(16, 8))
         self.status_label = ttk.Label(detail, text="", foreground="#888")
@@ -740,6 +925,35 @@ class TuningTab(ttk.Frame):
         self._commit()
         self.waveform.set_trim(self.trim_start_var.get(), self.trim_end_var.get())
 
+    def _suggest_smart_trim(self):
+        """Fills trim_start_ms/trim_end_ms with korean_tts.smart_trim_bounds()'s
+        suggestion for the selected sample - a windowed-RMS re-check that
+        catches a quiet-but-not-silent tail/head (room tone, breath) the
+        automatic per-sample trim_silence() left in place because a few
+        individual samples in there poke just above the threshold (see
+        korean_tts.trim_silence_smart's docstring for the real case this
+        was built for). Only fills the sliders - like every other override
+        here, nothing is written until '모든 변경사항 저장', so previewing
+        first is always possible before committing to it."""
+        if not self.current_name:
+            return
+        raw = self._load_raw(self.current_name)
+        if raw is None:
+            messagebox.showinfo("한국어 TTS", "이 항목은 아직 녹음되지 않았습니다.")
+            return
+        start, end = ktts.smart_trim_bounds(raw)
+        start_ms = min(200, round(start / ktts.TARGET_RATE * 1000))
+        end_ms = min(200, round((len(raw) - end) / ktts.TARGET_RATE * 1000))
+        self.trim_start_var.set(start_ms)
+        self.trim_end_var.set(end_ms)
+        self._sync_labels()
+        self._commit()
+        self.waveform.set_trim(self.trim_start_var.get(), self.trim_end_var.get())
+        self.status_label.config(
+            text=f"'{self.current_name}': 실제 무음 감지 - 시작 {start_ms}ms / 끝 {end_ms}ms 자르기 제안 "
+                 "(미리듣기로 확인 후 저장하세요)"
+        )
+
     def _reset(self):
         if not self.current_name:
             return
@@ -766,6 +980,62 @@ class TuningTab(ttk.Frame):
                 self.after(0, lambda: messagebox.showwarning("한국어 TTS", f"파일이 없습니다: {name}.wav"))
                 return
             samples = ktts.read_sample(path, override=override, audio_settings=self.app.audio_settings())
+            wav_bytes = ktts.to_wav_bytes(samples)
+            self.app.player.play(wav_bytes)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _preview_join_timing(self):
+        """Preview mode specifically for crossfade_ms/coda_max_ms/stop_gap_ms.
+        _preview() plays this ONE sample in isolation, so those three
+        settings - which only ever act BETWEEN pieces during real assembly
+        (see build_audio) - have nothing to apply to there and can never
+        audibly change anything, even though they work correctly in real
+        playback (this is the exact confusion that prompted adding this:
+        someone changing 받침 뒤 간격 here, hearing no difference via
+        '조정본 미리듣기', and concluding the override didn't work, when
+        changing the same setting globally in 재생 worked fine).
+
+        Builds a small synthetic two-group sequence - [filler, this
+        sample] as one "coda"-kind join, then a second lone group - so
+        there's an adjacent piece for crossfade_ms to blend with and a
+        following group for stop_gap_ms to appear before. The filler's
+        own identity doesn't matter (any other sample already in this
+        bank works); coda_max_ms only ever does anything if this sample's
+        LOGICAL name is a bare-tail piece (n/l/m/ng) and stop_gap_ms only
+        ever does anything if it logically ends in a stop coda, so this
+        is harmless for a sample where neither applies - it just plays
+        the ordinary crossfade-less "coda" join instead.
+
+        A hex_pieces bank's on-disk name isn't the logical name these
+        checks key off (see korean_tts.HEX_TO_ROMANIZED_NAME) - reversed
+        here so the demo exercises the right logic regardless of naming.
+        """
+        if not self.current_name or not self.all_names:
+            return
+        name = self.current_name
+        override = self._current_override()
+        filler = next((n for n in self.all_names if n != name), name)
+
+        settings = ktts._migrate_legacy_type(self.app.bank_manifest())
+        hex_pieces = bool(settings.get("hex_pieces"))
+        naming = settings.get("naming", "hex-codepoint")
+        logical_name = ktts.HEX_TO_ROMANIZED_NAME.get(name, name) if hex_pieces else name
+        logical_filler = ktts.HEX_TO_ROMANIZED_NAME.get(filler, filler) if hex_pieces else filler
+
+        sound_dir = self.app.current_sound_dir()
+        audio_settings = self.app.audio_settings()
+
+        def work():
+            groups = [("coda", [logical_filler, logical_name]), ("single", [logical_filler])]
+            samples, missing = ktts.build_audio(
+                groups, sound_dir, overrides={name: override} if override else None,
+                audio_settings=audio_settings, hex_pieces=hex_pieces, naming=naming,
+            )
+            if missing:
+                self.after(0, lambda: messagebox.showwarning(
+                    "한국어 TTS", f"파일이 없습니다: {', '.join(missing)}"))
+                return
             wav_bytes = ktts.to_wav_bytes(samples)
             self.app.player.play(wav_bytes)
 
