@@ -1,0 +1,17 @@
+{
+  "audio": {
+    "crossfade_fraction": {
+      "diphthong": 0.75
+    },
+    "crossfade_max_ms": {
+      "diphthong": 220
+    }
+  },
+  "schema_version": 1,
+  "settings": {
+    "fallback_bank": "default",
+    "hex_pieces": true,
+    "preserve_consonant_ui": true
+  },
+  "type": "diphone"
+}
