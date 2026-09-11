@@ -332,12 +332,12 @@ class MainTab(ttk.Frame):
             # Text changed since these were last set - stale indices, drop them.
             self.position_overrides = {}
         self._position_overrides_text = text
-        self._open_position_dialog(chars)
+        self._open_position_dialog(chars, settings_block)
 
-    def _open_position_dialog(self, chars):
+    def _open_position_dialog(self, chars, settings_block):
         win = tk.Toplevel(self)
         win.title("위치별 세부 조정")
-        win.geometry("560x420")
+        win.geometry("620x560")
         win.transient(self)
 
         ttk.Label(
@@ -363,33 +363,96 @@ class MainTab(ttk.Frame):
         for i in range(len(chars)):
             listbox.insert("end", label_for(i))
 
+        # The engine's own piece breakdown for THIS text (see
+        # korean_tts.resolve_groups) - a CVC syllable is usually two pieces
+        # (CV block + coda-tail, e.g. 녀+영 for 녕), so each piece gets its
+        # own panel below with independent gain/trim, instead of one
+        # setting applying identically to both halves.
+        hex_pieces = bool(settings_block.get("hex_pieces"))
+        naming = settings_block.get("naming", "hex-codepoint")
+        sound_dir = self.app.current_sound_dir()
+        real_groups = [g for g in ktts.resolve_groups(self._position_overrides_text, SOUND_ROOT,
+                                                        self.app.settings["voice"])
+                       if g[1] != [ktts.PAUSE]]
+        raw_cache = {}
+        audio_settings = self.app.audio_settings()
+
+        def load_piece_raw(file_name):
+            if file_name not in raw_cache:
+                path = os.path.join(sound_dir, file_name + ".wav")
+                raw_cache[file_name] = (
+                    ktts.read_sample(path, audio_settings=audio_settings) if os.path.exists(path) else None
+                )
+            return raw_cache[file_name]
+
         detail = ttk.Frame(body)
         detail.pack(side="left", fill="both", expand=True, padx=(12, 0))
 
-        gain_var = tk.DoubleVar(value=0.0)
-        gain_text = tk.StringVar()
-        crossfade_enabled = tk.BooleanVar(value=False)
-        crossfade_var = tk.DoubleVar(value=60)
-        coda_enabled = tk.BooleanVar(value=False)
-        coda_var = tk.DoubleVar(value=ktts.CODA_MAX_MS)
+        # Scrollable so a 2-3 piece syllable's stacked panels (each with
+        # gain/trim/crossfade/coda) never get clipped by the window height -
+        # same pattern as voice_recorder.py's settings panel.
+        piece_canvas = tk.Canvas(detail, highlightthickness=0)
+        piece_scrollbar = ttk.Scrollbar(detail, orient="vertical", command=piece_canvas.yview)
+        piece_canvas.configure(yscrollcommand=piece_scrollbar.set)
+        piece_canvas.pack(side="top", fill="both", expand=True)
+        piece_scrollbar.place(in_=piece_canvas, relx=1.0, rely=0, relheight=1.0, anchor="ne")
+        piece_container = ttk.Frame(piece_canvas)
+        piece_canvas.create_window((0, 0), window=piece_container, anchor="nw")
+        piece_container.bind(
+            "<Configure>", lambda _e: piece_canvas.configure(scrollregion=piece_canvas.bbox("all"))
+        )
+        piece_canvas.bind("<Enter>", lambda _e: piece_canvas.bind_all(
+            "<MouseWheel>", lambda ev: piece_canvas.yview_scroll(int(-1 * (ev.delta / 120)), "units")))
+        piece_canvas.bind("<Leave>", lambda _e: piece_canvas.unbind_all("<MouseWheel>"))
+
+        stopgap_row = ttk.Frame(detail)
+        stopgap_row.pack(fill="x", pady=(8, 2))
         stopgap_enabled = tk.BooleanVar(value=False)
         stopgap_var = tk.DoubleVar(value=ktts.DEFAULT_STOP_GAP_MS)
+        stopgap_text = tk.StringVar()
+
+        def sync_stopgap(_evt=None):
+            stopgap_text.set(f"받침 ㄱㄷㅂ 뒤 간격: {int(stopgap_var.get())}ms")
+            commit()
+
+        ttk.Checkbutton(stopgap_row, variable=stopgap_enabled, command=sync_stopgap).pack(side="left")
+        ttk.Label(stopgap_row, textvariable=stopgap_text, width=26).pack(side="left")
+        ttk.Scale(stopgap_row, from_=0, to=200, orient="horizontal", variable=stopgap_var,
+                  command=sync_stopgap).pack(side="left", fill="x", expand=True, padx=4)
+
         current_index = {"i": None}
+        piece_vars = []  # rebuilt per selection: one dict of tk Vars per piece in that position
 
-        def sync_labels():
-            gain_text.set(f"음량 보정: {gain_var.get():+.1f}dB")
+        def add_optional_row(parent, label, enabled_var, value_var, lo, hi, on_change):
+            row = ttk.Frame(parent)
+            row.pack(fill="x", padx=4, pady=2)
+            text_var = tk.StringVar(value=f"{label}: {int(value_var.get())}ms")
 
-        def current_override():
+            def sync(_evt=None):
+                text_var.set(f"{label}: {int(value_var.get())}ms")
+                on_change()
+
+            ttk.Checkbutton(row, variable=enabled_var, command=sync).pack(side="left")
+            ttk.Label(row, textvariable=text_var, width=26).pack(side="left")
+            ttk.Scale(row, from_=lo, to=hi, orient="horizontal", variable=value_var,
+                      command=sync).pack(side="left", fill="x", expand=True, padx=4)
+            return sync
+
+        def collect_piece(v):
             override = {}
-            gain = round(gain_var.get(), 1)
+            gain = round(v["gain_var"].get(), 1)
             if gain:
                 override["gain_db"] = gain
-            if crossfade_enabled.get():
-                override["crossfade_ms"] = int(crossfade_var.get())
-            if coda_enabled.get():
-                override["coda_max_ms"] = int(coda_var.get())
-            if stopgap_enabled.get():
-                override["stop_gap_ms"] = int(stopgap_var.get())
+            start_ms = int(v["trim_start_var"].get())
+            if start_ms:
+                override["trim_start_ms"] = start_ms
+            end_ms = int(v["trim_end_var"].get())
+            if end_ms:
+                override["trim_end_ms"] = end_ms
+            if v["crossfade_enabled"] is not None and v["crossfade_enabled"].get():
+                override["crossfade_ms"] = int(v["crossfade_var"].get())
+            if v["coda_enabled"] is not None and v["coda_enabled"].get():
+                override["coda_max_ms"] = int(v["coda_var"].get())
             return override
 
         def refresh_marker(i):
@@ -399,14 +462,108 @@ class MainTab(ttk.Frame):
 
         def commit():
             i = current_index["i"]
-            if i is None:
+            if i is None or not piece_vars:
                 return
-            override = current_override()
-            if override:
-                self.position_overrides[i] = override
+            entries = [collect_piece(v) for v in piece_vars]
+            if stopgap_enabled.get():
+                entries[-1] = {**entries[-1], "stop_gap_ms": int(stopgap_var.get())}
+            if any(entries):
+                self.position_overrides[i] = entries
             else:
                 self.position_overrides.pop(i, None)
             refresh_marker(i)
+
+        def build_piece_panels(i):
+            for child in piece_container.winfo_children():
+                child.destroy()
+            piece_vars.clear()
+
+            _kind, names = real_groups[i]
+            file_names = [ktts.piece_filename(n, hex_pieces, naming) for n in names]
+            stored = self.position_overrides.get(i) or []
+            multi = len(names) > 1
+
+            for idx, (name, file_name) in enumerate(zip(names, file_names)):
+                piece_override = stored[idx] if idx < len(stored) and stored[idx] else {}
+                label_char = ktts.piece_display_char(name, naming)
+                title = f"{'앞' if idx == 0 else '뒤'} 조각 - {label_char}" if multi else f"{label_char}"
+                frame = ttk.LabelFrame(piece_container, text=title)
+                frame.pack(fill="x", pady=4)
+
+                raw = load_piece_raw(file_name)
+                duration_ms = (len(raw) / ktts.TARGET_RATE * 1000) if raw else 0
+                trim_hi = max(0, min(300, int(duration_ms))) if raw else 300
+
+                gain_var = tk.DoubleVar(value=piece_override.get("gain_db", 0.0))
+                gain_text = tk.StringVar()
+                trim_start_var = tk.DoubleVar(value=min(piece_override.get("trim_start_ms", 0.0), trim_hi))
+                trim_end_var = tk.DoubleVar(value=min(piece_override.get("trim_end_ms", 0.0), trim_hi))
+                trim_start_text = tk.StringVar()
+                trim_end_text = tk.StringVar()
+
+                ttk.Label(frame, text="파형 (드래그해서 자르기 구간 조절 - 지금 이 위치에 설정된 그대로)",
+                          foreground="#888").pack(anchor="w", padx=4)
+                waveform = WaveformEditor(frame, on_drag=lambda s, e: None)
+                waveform.pack(padx=4, pady=(0, 4))
+                if raw is not None:
+                    waveform.load(raw)
+                    waveform.set_trim(trim_start_var.get(), trim_end_var.get())
+                else:
+                    waveform.redraw()
+
+                def sync(_evt=None, gv=gain_var, gt=gain_text, sv=trim_start_var, st=trim_start_text,
+                         ev=trim_end_var, et=trim_end_text, wf=waveform):
+                    gt.set(f"음량 보정: {gv.get():+.1f}dB")
+                    st.set(f"시작 자르기: {int(sv.get())}ms")
+                    et.set(f"끝 자르기: {int(ev.get())}ms")
+                    wf.set_trim(sv.get(), ev.get())
+                    commit()
+
+                def on_drag(start_ms, end_ms, sv=trim_start_var, ev=trim_end_var, s=sync):
+                    sv.set(round(start_ms))
+                    ev.set(round(end_ms))
+                    s()
+
+                waveform.on_drag = on_drag
+
+                sync()
+                ttk.Label(frame, textvariable=gain_text).pack(anchor="w", padx=4)
+                ttk.Scale(frame, from_=-12, to=12, orient="horizontal", variable=gain_var,
+                          command=sync).pack(fill="x", padx=4, pady=(0, 4))
+                ttk.Label(frame, textvariable=trim_start_text).pack(anchor="w", padx=4)
+                ttk.Scale(frame, from_=0, to=trim_hi, orient="horizontal", variable=trim_start_var,
+                          command=sync).pack(fill="x", padx=4, pady=(0, 4))
+                ttk.Label(frame, textvariable=trim_end_text).pack(anchor="w", padx=4)
+                ttk.Scale(frame, from_=0, to=trim_hi, orient="horizontal", variable=trim_end_var,
+                          command=sync).pack(fill="x", padx=4, pady=(0, 4))
+
+                crossfade_enabled = crossfade_var = coda_enabled = coda_var = None
+                if idx > 0:
+                    # Only a non-first piece is ever consulted for the join
+                    # right before it (see korean_tts._crossfade_join: the
+                    # LATER piece's crossfade_ms wins) - showing it here
+                    # matches which piece actually controls that join.
+                    crossfade_enabled = tk.BooleanVar(value="crossfade_ms" in piece_override)
+                    crossfade_var = tk.DoubleVar(value=piece_override.get("crossfade_ms", 60))
+                    add_optional_row(frame, "앞 조각과 교차 길이", crossfade_enabled, crossfade_var, 0, 200, commit)
+                    if name in ktts.CODA_TAILS:
+                        coda_enabled = tk.BooleanVar(value="coda_max_ms" in piece_override)
+                        coda_var = tk.DoubleVar(value=piece_override.get("coda_max_ms", ktts.CODA_MAX_MS))
+                        add_optional_row(frame, "받침 유지 길이", coda_enabled, coda_var, 0, 300, commit)
+
+                piece_vars.append({
+                    "gain_var": gain_var, "trim_start_var": trim_start_var, "trim_end_var": trim_end_var,
+                    "crossfade_enabled": crossfade_enabled, "crossfade_var": crossfade_var,
+                    "coda_enabled": coda_enabled, "coda_var": coda_var,
+                })
+
+            last = stored[-1] if stored else {}
+            stopgap_enabled.set("stop_gap_ms" in last)
+            stopgap_var.set(last.get("stop_gap_ms", ktts.DEFAULT_STOP_GAP_MS))
+            sync_stopgap_label_only()
+
+        def sync_stopgap_label_only():
+            stopgap_text.set(f"받침 ㄱㄷㅂ 뒤 간격: {int(stopgap_var.get())}ms")
 
         def on_select(_evt=None):
             selection = listbox.curselection()
@@ -414,39 +571,9 @@ class MainTab(ttk.Frame):
                 return
             i = selection[0]
             current_index["i"] = i
-            override = self.position_overrides.get(i, {})
-            gain_var.set(override.get("gain_db", 0.0))
-            crossfade_enabled.set("crossfade_ms" in override)
-            crossfade_var.set(override.get("crossfade_ms", 60))
-            coda_enabled.set("coda_max_ms" in override)
-            coda_var.set(override.get("coda_max_ms", ktts.CODA_MAX_MS))
-            stopgap_enabled.set("stop_gap_ms" in override)
-            stopgap_var.set(override.get("stop_gap_ms", ktts.DEFAULT_STOP_GAP_MS))
-            sync_labels()
+            build_piece_panels(i)
 
         listbox.bind("<<ListboxSelect>>", on_select)
-
-        ttk.Label(detail, textvariable=gain_text).pack(anchor="w")
-        ttk.Scale(detail, from_=-12, to=12, orient="horizontal", variable=gain_var,
-                  command=lambda _v: (sync_labels(), commit())).pack(fill="x", pady=(0, 10))
-
-        def add_optional(label, enabled_var, value_var, lo, hi):
-            row = ttk.Frame(detail)
-            row.pack(fill="x", pady=2)
-            text_var = tk.StringVar(value=f"{label}: {int(value_var.get())}ms")
-
-            def sync(_evt=None):
-                text_var.set(f"{label}: {int(value_var.get())}ms")
-                commit()
-
-            ttk.Checkbutton(row, variable=enabled_var, command=sync).pack(side="left")
-            ttk.Label(row, textvariable=text_var, width=22).pack(side="left")
-            ttk.Scale(row, from_=lo, to=hi, orient="horizontal", variable=value_var,
-                      command=sync).pack(side="left", fill="x", expand=True, padx=4)
-
-        add_optional("교차 길이", crossfade_enabled, crossfade_var, 0, 200)
-        add_optional("받침 유지 길이", coda_enabled, coda_var, 0, 300)
-        add_optional("받침 ㄱㄷㅂ 뒤 간격", stopgap_enabled, stopgap_var, 0, 200)
 
         btns = ttk.Frame(win)
         btns.pack(fill="x", padx=8, pady=8)
@@ -457,14 +584,15 @@ class MainTab(ttk.Frame):
                 return
             self.position_overrides.pop(i, None)
             refresh_marker(i)
-            on_select()
+            build_piece_panels(i)
 
         def reset_all():
             self.position_overrides.clear()
             for i in range(len(chars)):
                 listbox.delete(i)
                 listbox.insert(i, label_for(i))
-            current_index["i"] = None
+            if current_index["i"] is not None:
+                build_piece_panels(current_index["i"])
 
         ttk.Button(btns, text="이 위치 초기화", command=reset_this).pack(side="left")
         ttk.Button(btns, text="전체 초기화", command=reset_all).pack(side="left", padx=8)

@@ -1725,16 +1725,26 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
     through piece_filename unchanged, so this is safe regardless of which
     tiers a given group came from.
 
-    `position_overrides` is an optional {syllable_index: {gain_db,
-    trim_start_ms, trim_end_ms, crossfade_ms, coda_max_ms, stop_gap_ms}}
-    dict - the same shape/keys as a per-sample entry in `overrides`, but
+    `position_overrides` is an optional {syllable_index: entry} dict -
     applied to only the ONE occurrence at that index in `groups` (PAUSE
     groups don't count, so index 0 is the first real syllable, matching
     how a person reading the text would count them, not the raw character
     offset) rather than every occurrence of whatever file that syllable
-    happens to use elsewhere. Merged on top of (takes precedence over) any
-    per-sample entry in `overrides` for that syllable's own piece(s), and
-    only for that one syllable - a different occurrence of the exact same
+    happens to use elsewhere. `entry` is either:
+      - a flat {gain_db, trim_start_ms, trim_end_ms, crossfade_ms,
+        coda_max_ms, stop_gap_ms} dict, the same shape as a per-sample
+        entry in `overrides`, merged onto EVERY piece this syllable's own
+        assembly uses (e.g. both halves of a CVC split get the same gain);
+      - a list of such dicts (or None for "no override"), one per piece IN
+        ORDER (index 0 = the syllable's first/leftmost piece - for a CVC
+        split into CV+coda-tail, that's the CV block; index 1 the coda-
+        tail, and so on) - lets e.g. a CVC syllable's CV and coda-tail
+        halves get independently tuned gain/trim instead of identical
+        values. A single-piece syllable (plain CV or a lone override
+        recording) only ever has one meaningful index either way.
+    Either form is merged on top of (takes precedence over) any per-sample
+    entry in `overrides` for that syllable's own piece(s), and only for
+    that one syllable - a different occurrence of the exact same
     underlying file, or the same file used by a completely different bank
     call, is never affected. This is what gui.py's "위치별 세부 조정" panel
     writes; it has no on-disk representation of its own (never saved to a
@@ -1786,19 +1796,28 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
 
         file_names = [piece_filename(n, hex_pieces, naming) for n in names]
 
-        # A position override applies to every piece THIS syllable's own
-        # assembly uses, merged on top of (winning over) that piece's own
-        # file-level entry - built once per syllable so every lookup below
-        # (gain/trim, crossfade, coda shortening, stop-gap) sees it without
-        # needing five separate injection points. Falls back to `overrides`
-        # itself (no copy, no cache bypass) for the overwhelming common
-        # case of a syllable with no position override at all.
+        # A position override applies to this syllable's own piece(s),
+        # merged on top of (winning over) each piece's own file-level
+        # entry - built once per syllable so every lookup below (gain/
+        # trim, crossfade, coda shortening, stop-gap) sees it without
+        # needing five separate injection points. A flat dict applies the
+        # same entry to every piece; a list applies entry[i] to piece i
+        # only (piece order = names' order), so a CVC syllable's CV and
+        # coda-tail halves can get independent gain/trim/etc. Falls back
+        # to `overrides` itself (no copy, no cache bypass) for the
+        # overwhelming common case of a syllable with no position
+        # override at all.
         pos_override = position_overrides.get(syllable_index)
         group_overrides = overrides
         if pos_override:
             group_overrides = dict(overrides)
-            for fn in set(file_names):
-                group_overrides[fn] = {**overrides.get(fn, {}), **pos_override}
+            if isinstance(pos_override, list):
+                for idx, fn in enumerate(file_names):
+                    if idx < len(pos_override) and pos_override[idx]:
+                        group_overrides[fn] = {**overrides.get(fn, {}), **pos_override[idx]}
+            else:
+                for fn in set(file_names):
+                    group_overrides[fn] = {**overrides.get(fn, {}), **pos_override}
         syllable_index += 1
 
         chunks = []
@@ -1925,13 +1944,19 @@ def build_audio_with_fallback(
         # `overrides` is that bank's overrides file, not the fallback's,
         # so it isn't a fallback-served syllable's file names either way.
         # A position override on this syllable wins here too, same as it
-        # would inside build_audio()'s own group loop.
+        # would inside build_audio()'s own group loop - for a per-piece
+        # (list) override, only the entry for the LAST piece counts, same
+        # as build_audio()'s own group_overrides.get(file_names[-1], ...).
         this_stop_gap_ms = stop_gap_ms
         if sub_groups and (overrides or pos_override):
-            last_name = sub_groups[-1][1][-1]
-            last_file_name = piece_filename(last_name, hex_pieces, naming)
+            last_names = sub_groups[-1][1]
+            last_file_name = piece_filename(last_names[-1], hex_pieces, naming)
             this_stop_gap_ms = (overrides or {}).get(last_file_name, {}).get("stop_gap_ms", stop_gap_ms)
-            if pos_override and "stop_gap_ms" in pos_override:
+            if isinstance(pos_override, list):
+                last_idx = len(last_names) - 1
+                if last_idx < len(pos_override) and pos_override[last_idx] and "stop_gap_ms" in pos_override[last_idx]:
+                    this_stop_gap_ms = pos_override[last_idx]["stop_gap_ms"]
+            elif pos_override and "stop_gap_ms" in pos_override:
                 this_stop_gap_ms = pos_override["stop_gap_ms"]
 
         if sub_missing or not len(sub_track):
@@ -2069,6 +2094,61 @@ def synthesize(text, sound_root, voice, **kwargs):
         legacy_piece_check=legacy_check, hex_pieces=hex_pieces, **kwargs,
     )
     return samples, missing
+
+
+def resolve_groups(text, sound_root, voice):
+    """The (kind, [names]) groups text_to_groups() produces for `voice`,
+    using that bank's own settings/cascade - i.e. exactly the per-syllable
+    piece breakdown synthesize() would use for `text` with this voice.
+    Names are LOGICAL (pre-piece_filename) exactly as text_to_groups()
+    returns them - use piece_filename(name, hex_pieces, naming) to get the
+    on-disk identifier a build_audio() `overrides`/`position_overrides`
+    entry needs to be keyed by.
+
+    For a bank with `fallback_bank` configured, this reflects the PRIMARY
+    bank's own cascade for every syllable - the same thing
+    build_audio_with_fallback() checks first, before ever falling back -
+    so it's still accurate for any syllable that bank actually covers
+    itself; a fallback-served syllable's real (other-bank) pieces aren't
+    reflected here.
+
+    Used by gui.py's "위치별 세부 조정" panel to show which piece(s) make up
+    a given syllable, so e.g. a CVC syllable's CV block and coda-tail can
+    be labeled and tuned separately (see build_audio()'s position_overrides
+    list form).
+    """
+    bank_dir = voice_dir(sound_root, voice)
+    manifest = load_bank_manifest(bank_dir)
+    settings_block = _migrate_legacy_type(manifest)
+    phonology = resolve_phonology_options(settings_block)
+    naming = settings_block.get("naming", "hex-codepoint")
+    hex_pieces = bool(settings_block.get("hex_pieces"))
+    dedicated_check = _exists_check(bank_dir) if settings_block.get("dedicated_diphthongs") else None
+    override_check = _exists_check(bank_dir) if settings_block.get("syllable_overrides") else None
+    legacy_check = _legacy_piece_check(bank_dir, hex_pieces, naming) if dedicated_check is not None else None
+    return text_to_groups(text, dedicated_diphthong_check=dedicated_check,
+                           syllable_override_check=override_check, naming=naming,
+                           phonology=phonology, legacy_piece_check=legacy_check)
+
+
+def piece_display_char(name: str, naming: str = "hex-codepoint") -> str:
+    """A representative Hangul character for a LOGICAL piece/group name (as
+    text_to_groups()/resolve_groups() return them), for showing the user
+    what a given piece "sounds like" without exposing the raw filename.
+    Covers every tier: a tier-3 base piece name (e.g. "ga", "n") looks
+    itself up in PIECE_REPRESENTATIVE_CHARS; a tier-1/2 name is already a
+    hex codepoint or literal character (per `naming`) of a REAL syllable,
+    so it's decoded directly. Falls back to the raw name if it's neither
+    (shouldn't normally happen for a name text_to_groups actually produced).
+    """
+    if name in PIECE_REPRESENTATIVE_CHARS:
+        return PIECE_REPRESENTATIVE_CHARS[name]
+    if naming == "char" and len(name) == 1:
+        return name
+    try:
+        return chr(int(name, 16))
+    except (ValueError, OverflowError):
+        return name
 
 
 def to_wav_bytes(samples: array.array) -> bytes:
