@@ -457,7 +457,15 @@ class App(tk.Tk):
         # is universal). Reuses the SAME record/preview controls above
         # (they don't reference a name at all, only self.current_take) -
         # only the save destination differs.
-        self.override_frame = ttk.LabelFrame(self, text="특정 음절 다시 녹음 (전체 대체)")
+        # top_row holds this panel side-by-side with the whole-voice batch
+        # panel below, so both stay visible right at the top regardless of
+        # how tall the rest of the window's content gets (the batch button
+        # used to live at the bottom of the 다듬기 panel, where it could
+        # scroll out of reach - see _build_edit_panel's note).
+        self.top_row = ttk.Frame(self)
+
+        self.override_frame = ttk.LabelFrame(self.top_row, text="특정 음절 다시 녹음 (전체 대체)")
+        self.override_frame.pack(side="left", fill="both", expand=True)
         ttk.Label(self.override_frame, text="음절:").grid(row=0, column=0, padx=8, pady=6, sticky="w")
         override_entry = ttk.Entry(self.override_frame, textvariable=self.override_char_var, width=4, font=("", 16))
         override_entry.grid(row=0, column=1, padx=4, pady=6, sticky="w")
@@ -474,7 +482,17 @@ class App(tk.Tk):
                   "다시 녹음하고 싶을 때 사용)."),
             wraplength=560, foreground="#888",
         ).grid(row=1, column=0, columnspan=4, padx=8, pady=(0, 6), sticky="w")
-        # Not packed here - _open_bank() packs/hides it based on bank type.
+
+        batch_frame = ttk.LabelFrame(self.top_row, text="전체 목소리 일괄 처리")
+        batch_frame.pack(side="left", fill="y", padx=(8, 0))
+        ttk.Label(
+            batch_frame, foreground="#888", wraplength=220,
+            text="녹음된 파일 전체에 정규화/실제 무음 자르기를 한 번에 적용 (파일마다 처음 한 번만 백업).",
+        ).pack(anchor="w", padx=8, pady=(6, 4))
+        ttk.Button(batch_frame, text="전체 정규화 + 실제 무음 자르기", command=self._normalize_and_trim_all).pack(
+            anchor="w", padx=8, pady=(0, 8)
+        )
+        # top_row isn't packed here - _open_bank() packs/hides it based on bank type.
 
         body = ttk.Frame(self)
         self.body = body
@@ -565,7 +583,7 @@ class App(tk.Tk):
             self.new_bank_frame.pack_forget()
             self._open_bank(name)
         else:
-            self.override_frame.pack_forget()
+            self.top_row.pack_forget()
             self._prepare_new_bank_ui(name)
 
     def _prepare_new_bank_ui(self, name):
@@ -674,7 +692,7 @@ class App(tk.Tk):
 
         self.override_char_var.set("")
         self._update_override_status()
-        self.override_frame.pack(fill="x", padx=10, pady=(0, 8), before=self.body)
+        self.top_row.pack(fill="x", padx=10, pady=(0, 8), before=self.body)
 
         self._refresh_voice_list()
         self._refresh_done_markers()
@@ -842,17 +860,10 @@ class App(tk.Tk):
                 "여기 없습니다 - 그건 데스크톱 앱(gui.py/KoreanTTS.exe)의 고급 설정 탭에서 "
                 "sound_overrides.json 으로 계속 다룹니다.")
         ttk.Label(frame, text=note, wraplength=440, foreground="#888").pack(anchor="w", padx=8, pady=(0, 8))
-
-        ttk.Separator(frame, orient="horizontal").pack(fill="x", padx=8, pady=4)
-        ttk.Label(frame, text="전체 목소리 일괄 처리", font=("", 10, "bold")).pack(anchor="w", padx=8)
-        ttk.Label(
-            frame, foreground="#888", wraplength=440,
-            text="이 목소리의 녹음된 파일 전체에 위의 정규화/실제 무음 자르기를 한 번에 적용합니다 "
-                 "(선택한 파일 하나가 아니라 전부). 마찬가지로 처음 한 번만 <이름>.orig 로 백업됩니다.",
-        ).pack(anchor="w", padx=8, pady=(0, 4))
-        ttk.Button(frame, text="전체 정규화 + 실제 무음 자르기", command=self._normalize_and_trim_all).pack(
-            anchor="w", padx=8, pady=(0, 8)
-        )
+        # Whole-voice batch normalize/trim button lives in top_row (next to
+        # 특정 음절 다시 녹음), not here - this panel can scroll/grow past
+        # the window height depending on what's selected, which made a
+        # bottom-of-panel button here easy to lose track of.
 
     def _sync_edit_labels(self):
         self.edit_gain_text.set(f"음량 보정: {self.edit_gain_var.get():+.1f}dB")
