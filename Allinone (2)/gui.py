@@ -422,6 +422,7 @@ class MainTab(ttk.Frame):
 
         current_index = {"i": None}
         piece_vars = []  # rebuilt per selection: one dict of tk Vars per piece in that position
+        stopgap_baseline = {"present": False, "value": ktts.DEFAULT_STOP_GAP_MS}
 
         def add_optional_row(parent, label, enabled_var, value_var, lo, hi, on_change):
             row = ttk.Frame(parent)
@@ -439,20 +440,33 @@ class MainTab(ttk.Frame):
             return sync
 
         def collect_piece(v):
+            # Sliders are pre-filled from this piece's CURRENT 고급 설정
+            # value (see build_piece_panels) so the user can see how it's
+            # set before touching anything - so a field is only written
+            # into the position override when it actually DIFFERS from
+            # that baseline; left alone, it stays unwritten and keeps
+            # inheriting the file-level setting live (including any LATER
+            # change made in 고급 설정), instead of silently freezing
+            # today's value into this one occurrence.
+            b = v["baseline"]
             override = {}
             gain = round(v["gain_var"].get(), 1)
-            if gain:
+            if gain != round(b["gain_db"], 1):
                 override["gain_db"] = gain
             start_ms = int(v["trim_start_var"].get())
-            if start_ms:
+            if start_ms != int(b["trim_start_ms"]):
                 override["trim_start_ms"] = start_ms
             end_ms = int(v["trim_end_var"].get())
-            if end_ms:
+            if end_ms != int(b["trim_end_ms"]):
                 override["trim_end_ms"] = end_ms
-            if v["crossfade_enabled"] is not None and v["crossfade_enabled"].get():
-                override["crossfade_ms"] = int(v["crossfade_var"].get())
-            if v["coda_enabled"] is not None and v["coda_enabled"].get():
-                override["coda_max_ms"] = int(v["coda_var"].get())
+            if v["crossfade_enabled"] is not None:
+                checked, value = v["crossfade_enabled"].get(), int(v["crossfade_var"].get())
+                if checked and (not b["crossfade_present"] or value != int(b["crossfade_ms"])):
+                    override["crossfade_ms"] = value
+            if v["coda_enabled"] is not None:
+                checked, value = v["coda_enabled"].get(), int(v["coda_var"].get())
+                if checked and (not b["coda_present"] or value != int(b["coda_ms"])):
+                    override["coda_max_ms"] = value
             return override
 
         def refresh_marker(i):
@@ -465,8 +479,9 @@ class MainTab(ttk.Frame):
             if i is None or not piece_vars:
                 return
             entries = [collect_piece(v) for v in piece_vars]
-            if stopgap_enabled.get():
-                entries[-1] = {**entries[-1], "stop_gap_ms": int(stopgap_var.get())}
+            checked, value = stopgap_enabled.get(), int(stopgap_var.get())
+            if checked and (not stopgap_baseline["present"] or value != int(stopgap_baseline["value"])):
+                entries[-1] = {**entries[-1], "stop_gap_ms": value}
             if any(entries):
                 self.position_overrides[i] = entries
             else:
@@ -485,6 +500,20 @@ class MainTab(ttk.Frame):
 
             for idx, (name, file_name) in enumerate(zip(names, file_names)):
                 piece_override = stored[idx] if idx < len(stored) and stored[idx] else {}
+                # The file's CURRENT 고급 설정 (per-sample tuning tab) value
+                # for this piece - shown here as the starting point so the
+                # user sees how it's already set before changing anything
+                # for just this one occurrence (see collect_piece).
+                file_override = self.app.overrides.get(file_name, {})
+                baseline = {
+                    "gain_db": file_override.get("gain_db", 0.0),
+                    "trim_start_ms": file_override.get("trim_start_ms", 0.0),
+                    "trim_end_ms": file_override.get("trim_end_ms", 0.0),
+                    "crossfade_present": "crossfade_ms" in file_override,
+                    "crossfade_ms": file_override.get("crossfade_ms", 60),
+                    "coda_present": "coda_max_ms" in file_override,
+                    "coda_ms": file_override.get("coda_max_ms", ktts.CODA_MAX_MS),
+                }
                 label_char = ktts.piece_display_char(name, naming)
                 title = f"{'앞' if idx == 0 else '뒤'} 조각 - {label_char}" if multi else f"{label_char}"
                 frame = ttk.LabelFrame(piece_container, text=title)
@@ -494,10 +523,12 @@ class MainTab(ttk.Frame):
                 duration_ms = (len(raw) / ktts.TARGET_RATE * 1000) if raw else 0
                 trim_hi = max(0, min(300, int(duration_ms))) if raw else 300
 
-                gain_var = tk.DoubleVar(value=piece_override.get("gain_db", 0.0))
+                gain_var = tk.DoubleVar(value=piece_override.get("gain_db", baseline["gain_db"]))
                 gain_text = tk.StringVar()
-                trim_start_var = tk.DoubleVar(value=min(piece_override.get("trim_start_ms", 0.0), trim_hi))
-                trim_end_var = tk.DoubleVar(value=min(piece_override.get("trim_end_ms", 0.0), trim_hi))
+                trim_start_var = tk.DoubleVar(
+                    value=min(piece_override.get("trim_start_ms", baseline["trim_start_ms"]), trim_hi))
+                trim_end_var = tk.DoubleVar(
+                    value=min(piece_override.get("trim_end_ms", baseline["trim_end_ms"]), trim_hi))
                 trim_start_text = tk.StringVar()
                 trim_end_text = tk.StringVar()
 
@@ -526,7 +557,17 @@ class MainTab(ttk.Frame):
 
                 waveform.on_drag = on_drag
 
-                sync()
+                # Fill the labels directly instead of calling sync() here:
+                # sync() also calls commit(), which reads ALL of piece_vars -
+                # but this piece hasn't been appended to it yet (that only
+                # happens once every widget below is built), so committing
+                # now would see an incomplete piece list and could attach
+                # stop_gap_ms to the wrong (not-yet-last) entry. Real
+                # commits only need to happen from here on in response to
+                # actual user interaction, once construction has finished.
+                gain_text.set(f"음량 보정: {gain_var.get():+.1f}dB")
+                trim_start_text.set(f"시작 자르기: {int(trim_start_var.get())}ms")
+                trim_end_text.set(f"끝 자르기: {int(trim_end_var.get())}ms")
                 ttk.Label(frame, textvariable=gain_text).pack(anchor="w", padx=4)
                 ttk.Scale(frame, from_=-12, to=12, orient="horizontal", variable=gain_var,
                           command=sync).pack(fill="x", padx=4, pady=(0, 4))
@@ -543,23 +584,38 @@ class MainTab(ttk.Frame):
                     # right before it (see korean_tts._crossfade_join: the
                     # LATER piece's crossfade_ms wins) - showing it here
                     # matches which piece actually controls that join.
-                    crossfade_enabled = tk.BooleanVar(value="crossfade_ms" in piece_override)
-                    crossfade_var = tk.DoubleVar(value=piece_override.get("crossfade_ms", 60))
+                    # A key present in the stored position override is this
+                    # position's own explicit choice; otherwise fall back to
+                    # the file's current 고급 설정 value/checked-state - same
+                    # per-key fallback build_audio()'s own merge uses.
+                    cf_checked = ("crossfade_ms" in piece_override) or baseline["crossfade_present"]
+                    cf_value = piece_override.get("crossfade_ms", baseline["crossfade_ms"])
+                    crossfade_enabled = tk.BooleanVar(value=cf_checked)
+                    crossfade_var = tk.DoubleVar(value=cf_value)
                     add_optional_row(frame, "앞 조각과 교차 길이", crossfade_enabled, crossfade_var, 0, 200, commit)
                     if name in ktts.CODA_TAILS:
-                        coda_enabled = tk.BooleanVar(value="coda_max_ms" in piece_override)
-                        coda_var = tk.DoubleVar(value=piece_override.get("coda_max_ms", ktts.CODA_MAX_MS))
+                        coda_checked = ("coda_max_ms" in piece_override) or baseline["coda_present"]
+                        coda_value = piece_override.get("coda_max_ms", baseline["coda_ms"])
+                        coda_enabled = tk.BooleanVar(value=coda_checked)
+                        coda_var = tk.DoubleVar(value=coda_value)
                         add_optional_row(frame, "받침 유지 길이", coda_enabled, coda_var, 0, 300, commit)
 
                 piece_vars.append({
                     "gain_var": gain_var, "trim_start_var": trim_start_var, "trim_end_var": trim_end_var,
                     "crossfade_enabled": crossfade_enabled, "crossfade_var": crossfade_var,
-                    "coda_enabled": coda_enabled, "coda_var": coda_var,
+                    "coda_enabled": coda_enabled, "coda_var": coda_var, "baseline": baseline,
                 })
 
+            # The stop-gap control is position-level (only the LAST piece's
+            # value is ever consulted - see build_audio()), so its baseline
+            # comes from that last piece's own 고급 설정 value, same idea as
+            # every per-piece field above.
+            last_file_override = self.app.overrides.get(file_names[-1], {})
+            stopgap_baseline["present"] = "stop_gap_ms" in last_file_override
+            stopgap_baseline["value"] = last_file_override.get("stop_gap_ms", ktts.DEFAULT_STOP_GAP_MS)
             last = stored[-1] if stored else {}
-            stopgap_enabled.set("stop_gap_ms" in last)
-            stopgap_var.set(last.get("stop_gap_ms", ktts.DEFAULT_STOP_GAP_MS))
+            stopgap_enabled.set(("stop_gap_ms" in last) or stopgap_baseline["present"])
+            stopgap_var.set(last.get("stop_gap_ms", stopgap_baseline["value"]))
             sync_stopgap_label_only()
 
         def sync_stopgap_label_only():
