@@ -1818,7 +1818,7 @@ def _crossfade_join(chunks, kind: str, names=None, overrides=None, audio_setting
 def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossfade=True, speed=1.0,
                  stop_gap_ms=DEFAULT_STOP_GAP_MS, overrides=None, audio_settings=None,
                  hex_pieces=False, naming="hex-codepoint", position_overrides=None,
-                 speed_method=DEFAULT_SPEED_METHOD):
+                 speed_method=DEFAULT_SPEED_METHOD, pause_overrides=None):
     """Concatenate grouped samples (from text_to_groups) into one mono track.
 
     Each group's samples are crossfaded together (see _crossfade_join) rather
@@ -1888,6 +1888,16 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
     For backwards compatibility, `groups` may also be a flat list of names
     (as text_to_samples returns): each name is then treated as its own
     'single' group, with no crossfading.
+
+    `pause_overrides` is an optional {pause_index: gap_ms} dict - each
+    PAUSE group counts as its own pause_index (0 for the first, matching
+    text order; a run of unspeakable characters is already collapsed into
+    one PAUSE group upstream in text_to_groups, so a run of spaces/
+    punctuation together only ever counts as ONE pause_index, not one per
+    character) - overriding just that one gap's length instead of every
+    pause in the text. Falls back to the flat `gap_ms` for any pause not
+    named here, same idea as position_overrides but for the silence
+    between syllables/words rather than the syllables themselves.
     """
     settings = audio_settings if audio_settings is not None else AudioSettings()
     track = array.array("h")
@@ -1900,7 +1910,9 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
     prev_stop_gap_ms = stop_gap_ms
     overrides = overrides or {}
     position_overrides = position_overrides or {}
+    pause_overrides = pause_overrides or {}
     syllable_index = 0
+    pause_index = 0
 
     if groups and isinstance(groups[0], str):
         groups = [("single", [name]) for name in groups]
@@ -1920,7 +1932,12 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
 
     for kind, names in groups:
         if names == [PAUSE]:
-            track.extend(gap)
+            this_gap_ms = pause_overrides.get(pause_index)
+            track.extend(
+                gap if this_gap_ms is None else
+                array.array("h", bytes(int(TARGET_RATE * this_gap_ms / 1000) * SAMPLE_WIDTH))
+            )
+            pause_index += 1
             prev_ends_in_stop = False
             continue
 
@@ -1994,6 +2011,7 @@ def build_audio_with_fallback(
     overrides=None, audio_settings=None, naming="hex-codepoint", phonology=None,
     syllable_override_check=None, dedicated_diphthong_check=None, legacy_piece_check=None,
     hex_pieces=False, position_overrides=None, speed_method=DEFAULT_SPEED_METHOD,
+    pause_overrides=None,
 ):
     """Per-character assembly for a bank that has a `fallback_bank`
     configured. Each composed-and-neutralized character is resolved
@@ -2038,12 +2056,19 @@ def build_audio_with_fallback(
     prev_stop_gap_ms = stop_gap_ms
     pending_pause = False
     position_overrides = position_overrides or {}
+    pause_overrides = pause_overrides or {}
     syllable_index = 0
+    pause_index = 0
 
     for slot in _parse_and_apply_rules(text, phonology):
         if not isinstance(slot, list):
             if not pending_pause:
-                track.extend(gap)
+                this_gap_ms = pause_overrides.get(pause_index)
+                track.extend(
+                    gap if this_gap_ms is None else
+                    array.array("h", bytes(int(TARGET_RATE * this_gap_ms / 1000) * SAMPLE_WIDTH))
+                )
+                pause_index += 1
                 prev_ends_in_stop = False
                 pending_pause = True
             continue

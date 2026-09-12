@@ -263,7 +263,8 @@ class MainTab(ttk.Frame):
         self.app = app
         self._last_track = None  # last built samples, for :save-equivalent without rebuilding
         self.position_overrides = {}  # {syllable index in current text: {gain_db, ...}} - session-only, see on_position_overrides
-        self._position_overrides_text = None  # the text position_overrides was built against - see _build
+        self.pause_overrides = {}  # {pause index in current text: gap_ms} - session-only, same idea for the silences
+        self._position_overrides_text = None  # the text position_overrides/pause_overrides were built against - see _build
 
         ttk.Label(self, text="읽을 한국어를 입력하세요").pack(anchor="w", padx=8, pady=(8, 0))
         self.text_box = tk.Text(self, height=5, wrap="word")
@@ -365,11 +366,9 @@ class MainTab(ttk.Frame):
         # syllables the user actually adjusted, so they're silently not
         # applied rather than risk hitting the wrong syllable. Reopening
         # "위치별 세부 조정" against the new text re-establishes them.
-        position_overrides = (
-            self.position_overrides
-            if self.position_overrides and self._position_overrides_text == text
-            else None
-        )
+        text_matches = self._position_overrides_text == text
+        position_overrides = self.position_overrides if self.position_overrides and text_matches else None
+        pause_overrides = self.pause_overrides if self.pause_overrides and text_matches else None
         return ktts.synthesize(
             text, SOUND_ROOT, self.app.settings["voice"],
             gap_ms=int(self.app.settings["gap_ms"]),
@@ -378,6 +377,7 @@ class MainTab(ttk.Frame):
             speed_method=self.app.settings["speed_method"],
             overrides=self.app.overrides,
             position_overrides=position_overrides,
+            pause_overrides=pause_overrides,
         )
 
     def on_position_overrides(self):
@@ -400,6 +400,7 @@ class MainTab(ttk.Frame):
         if self._position_overrides_text != text:
             # Text changed since these were last set - stale indices, drop them.
             self.position_overrides = {}
+            self.pause_overrides = {}
         self._position_overrides_text = text
         self._open_position_dialog(chars, settings_block)
 
@@ -411,26 +412,19 @@ class MainTab(ttk.Frame):
 
         ttk.Label(
             win, foreground="#555", wraplength=520,
-            text="목록에서 음절을 골라 그 위치에만 적용될 조정을 합니다. "
-                 "같은 글자가 문장 다른 곳에 또 나와도 영향 없습니다. "
+            text="목록에서 음절이나 [간격](띄어쓰기/쉼표 등)을 골라 그 위치에만 적용될 조정을 "
+                 "합니다. 같은 글자나 간격이 문장 다른 곳에 또 나와도 영향 없습니다. "
                  "문장을 수정하면 이 조정은 다시 확인이 필요합니다 (저장되지 않음).",
         ).pack(anchor="w", padx=8, pady=(8, 4))
 
         body = ttk.Frame(win)
         body.pack(fill="both", expand=True, padx=8, pady=4)
 
-        listbox = tk.Listbox(body, width=14, exportselection=False)
+        listbox = tk.Listbox(body, width=16, exportselection=False)
         listbox.pack(side="left", fill="y")
         scrollbar = ttk.Scrollbar(body, orient="vertical", command=listbox.yview)
         scrollbar.pack(side="left", fill="y")
         listbox.config(yscrollcommand=scrollbar.set)
-
-        def label_for(i):
-            marker = " *" if i in self.position_overrides else ""
-            return f"{i}: {chars[i]}{marker}"
-
-        for i in range(len(chars)):
-            listbox.insert("end", label_for(i))
 
         # The engine's own piece breakdown for THIS text (see
         # korean_tts.resolve_groups) - a CVC syllable is usually two pieces
@@ -440,9 +434,37 @@ class MainTab(ttk.Frame):
         hex_pieces = bool(settings_block.get("hex_pieces"))
         naming = settings_block.get("naming", "hex-codepoint")
         sound_dir = self.app.current_sound_dir()
-        real_groups = [g for g in ktts.resolve_groups(self._position_overrides_text, SOUND_ROOT,
-                                                        self.app.settings["voice"])
-                       if g[1] != [ktts.PAUSE]]
+        all_groups = ktts.resolve_groups(self._position_overrides_text, SOUND_ROOT, self.app.settings["voice"])
+        real_groups = [g for g in all_groups if g[1] != [ktts.PAUSE]]
+
+        # One listbox ROW per group in text order, syllable or pause alike -
+        # (kind, kind-specific index) so a pause can be selected and tuned
+        # just like a syllable, but keeps its OWN index namespace matching
+        # exactly how build_audio() counts position_overrides' syllable_index
+        # and pause_overrides' pause_index separately (each only counting
+        # its own kind). The listbox ROW number is separate from both - see
+        # label_for/on_select, which translate between the two.
+        row_entries = []
+        syl_i = pause_i = 0
+        for kind, names in all_groups:
+            if names == [ktts.PAUSE]:
+                row_entries.append(("pause", pause_i))
+                pause_i += 1
+            else:
+                row_entries.append(("syllable", syl_i))
+                syl_i += 1
+
+        def label_for(row):
+            kind, i = row_entries[row]
+            if kind == "pause":
+                marker = " *" if i in self.pause_overrides else ""
+                return f"[간격 {i}]{marker}"
+            marker = " *" if i in self.position_overrides else ""
+            return f"{i}: {chars[i]}{marker}"
+
+        for row in range(len(row_entries)):
+            listbox.insert("end", label_for(row))
+
         raw_cache = {}
         audio_settings = self.app.audio_settings()
 
@@ -489,7 +511,8 @@ class MainTab(ttk.Frame):
         ttk.Scale(stopgap_row, from_=0, to=200, orient="horizontal", variable=stopgap_var,
                   command=sync_stopgap).pack(side="left", fill="x", expand=True, padx=4)
 
-        current_index = {"i": None}
+        current_index = {"i": None}  # the selected LISTBOX ROW (for refresh_marker) - see current_entry for kind/index
+        current_entry = {"kind": None, "idx": None}  # ("syllable"|"pause", kind-specific index) of the current row
         piece_vars = []  # rebuilt per selection: one dict of tk Vars per piece in that position
         stopgap_baseline = {"present": False, "value": ktts.DEFAULT_STOP_GAP_MS}
 
@@ -544,18 +567,19 @@ class MainTab(ttk.Frame):
             listbox.selection_set(i)
 
         def commit():
-            i = current_index["i"]
-            if i is None or not piece_vars:
+            row = current_index["i"]
+            syl_i = current_entry["idx"]
+            if row is None or current_entry["kind"] != "syllable" or not piece_vars:
                 return
-            entries = [collect_piece(v) for v in piece_vars]
+            piece_entries = [collect_piece(v) for v in piece_vars]
             checked, value = stopgap_enabled.get(), int(stopgap_var.get())
             if checked and (not stopgap_baseline["present"] or value != int(stopgap_baseline["value"])):
-                entries[-1] = {**entries[-1], "stop_gap_ms": value}
-            if any(entries):
-                self.position_overrides[i] = entries
+                piece_entries[-1] = {**piece_entries[-1], "stop_gap_ms": value}
+            if any(piece_entries):
+                self.position_overrides[syl_i] = piece_entries
             else:
-                self.position_overrides.pop(i, None)
-            refresh_marker(i)
+                self.position_overrides.pop(syl_i, None)
+            refresh_marker(row)
 
         def build_piece_panels(i):
             for child in piece_container.winfo_children():
@@ -756,13 +780,67 @@ class MainTab(ttk.Frame):
         def sync_stopgap_label_only():
             stopgap_text.set(f"받침 ㄱㄷㅂ 뒤 간격: {int(stopgap_var.get())}ms")
 
+        pause_state = {"var": None}
+
+        def commit_pause():
+            row = current_index["i"]
+            if row is None or current_entry["kind"] != "pause" or pause_state["var"] is None:
+                return
+            pause_i = current_entry["idx"]
+            value = int(pause_state["var"].get())
+            baseline = int(self.app.settings["gap_ms"])
+            # Same "only write if it differs from the current baseline" idea
+            # as a piece's own fields (see collect_piece) - the baseline
+            # here is the whole-voice 재생 tab's 띄어쓰기 간격 slider, so an
+            # untouched pause keeps tracking that live instead of freezing
+            # today's value into this one occurrence.
+            if value != baseline:
+                self.pause_overrides[pause_i] = value
+            else:
+                self.pause_overrides.pop(pause_i, None)
+            refresh_marker(row)
+
+        def build_pause_panel(pause_idx):
+            for child in piece_container.winfo_children():
+                child.destroy()
+            piece_vars.clear()
+
+            baseline = int(self.app.settings["gap_ms"])
+            stored = self.pause_overrides.get(pause_idx)
+            frame = ttk.LabelFrame(piece_container, text=f"간격 {pause_idx}")
+            frame.pack(fill="x", pady=4)
+            ttk.Label(
+                frame, foreground="#888", wraplength=440,
+                text="이 위치 하나의 간격 길이 (예: 띄어쓰기/쉼표) - 지금 재생 탭의 "
+                     "'띄어쓰기 간격' 값에서 시작합니다.",
+            ).pack(anchor="w", padx=4, pady=(4, 4))
+
+            gap_var = tk.DoubleVar(value=stored if stored is not None else baseline)
+            gap_text = tk.StringVar()
+            pause_state["var"] = gap_var
+
+            def sync(_evt=None):
+                gap_text.set(f"간격 길이: {int(gap_var.get())}ms")
+                commit_pause()
+
+            gap_text.set(f"간격 길이: {int(gap_var.get())}ms")
+            ttk.Label(frame, textvariable=gap_text).pack(anchor="w", padx=4)
+            ttk.Scale(frame, from_=0, to=1500, orient="horizontal", variable=gap_var,
+                      command=sync).pack(fill="x", padx=4, pady=(0, 8))
+
         def on_select(_evt=None):
             selection = listbox.curselection()
             if not selection:
                 return
-            i = selection[0]
-            current_index["i"] = i
-            build_piece_panels(i)
+            row = selection[0]
+            kind, idx = row_entries[row]
+            current_index["i"] = row
+            current_entry["kind"] = kind
+            current_entry["idx"] = idx
+            if kind == "pause":
+                build_pause_panel(idx)
+            else:
+                build_piece_panels(idx)
 
         listbox.bind("<<ListboxSelect>>", on_select)
 
@@ -770,20 +848,31 @@ class MainTab(ttk.Frame):
         btns.pack(fill="x", padx=8, pady=8)
 
         def reset_this():
-            i = current_index["i"]
-            if i is None:
+            row = current_index["i"]
+            if row is None:
                 return
-            self.position_overrides.pop(i, None)
-            refresh_marker(i)
-            build_piece_panels(i)
+            kind, idx = current_entry["kind"], current_entry["idx"]
+            if kind == "pause":
+                self.pause_overrides.pop(idx, None)
+                refresh_marker(row)
+                build_pause_panel(idx)
+            else:
+                self.position_overrides.pop(idx, None)
+                refresh_marker(row)
+                build_piece_panels(idx)
 
         def reset_all():
             self.position_overrides.clear()
-            for i in range(len(chars)):
-                listbox.delete(i)
-                listbox.insert(i, label_for(i))
+            self.pause_overrides.clear()
+            for row in range(len(row_entries)):
+                listbox.delete(row)
+                listbox.insert(row, label_for(row))
             if current_index["i"] is not None:
-                build_piece_panels(current_index["i"])
+                kind, idx = current_entry["kind"], current_entry["idx"]
+                if kind == "pause":
+                    build_pause_panel(idx)
+                else:
+                    build_piece_panels(idx)
 
         ttk.Button(btns, text="이 위치 초기화", command=reset_this).pack(side="left")
         ttk.Button(btns, text="전체 초기화", command=reset_all).pack(side="left", padx=8)
