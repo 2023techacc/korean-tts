@@ -843,6 +843,17 @@ class App(tk.Tk):
                 "sound_overrides.json 으로 계속 다룹니다.")
         ttk.Label(frame, text=note, wraplength=440, foreground="#888").pack(anchor="w", padx=8, pady=(0, 8))
 
+        ttk.Separator(frame, orient="horizontal").pack(fill="x", padx=8, pady=4)
+        ttk.Label(frame, text="전체 목소리 일괄 처리", font=("", 10, "bold")).pack(anchor="w", padx=8)
+        ttk.Label(
+            frame, foreground="#888", wraplength=440,
+            text="이 목소리의 녹음된 파일 전체에 위의 정규화/실제 무음 자르기를 한 번에 적용합니다 "
+                 "(선택한 파일 하나가 아니라 전부). 마찬가지로 처음 한 번만 <이름>.orig 로 백업됩니다.",
+        ).pack(anchor="w", padx=8, pady=(0, 4))
+        ttk.Button(frame, text="전체 정규화 + 실제 무음 자르기", command=self._normalize_and_trim_all).pack(
+            anchor="w", padx=8, pady=(0, 8)
+        )
+
     def _sync_edit_labels(self):
         self.edit_gain_text.set(f"음량 보정: {self.edit_gain_var.get():+.1f}dB")
         self.edit_trim_start_text.set(f"시작 자르기: {int(self.edit_trim_start_var.get())}ms")
@@ -945,23 +956,28 @@ class App(tk.Tk):
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _backup_and_overwrite(self, path, samples) -> bool:
-        """Shared by _apply_edit/_normalize_now: backs up the pre-edit file
-        to <name>.orig on first use (never overwritten again, so it always
-        holds the true original take), then writes `samples` over the
-        original. Returns False (after showing an error) on any failure."""
+    def _backup_and_overwrite(self, path, samples, quiet=False) -> bool:
+        """Shared by _apply_edit/_normalize_now/the whole-voice batch pass:
+        backs up the pre-edit file to <name>.orig on first use (never
+        overwritten again, so it always holds the true original take), then
+        writes `samples` over the original. Returns False on any failure -
+        `quiet=True` skips the error dialog (for a caller processing many
+        files at once, like the batch pass, which aggregates failures into
+        one summary instead of a dialog per file)."""
         backup_path = path[:-4] + ".orig"
         if not os.path.exists(backup_path):
             try:
                 shutil.copy(path, backup_path)
             except OSError as e:
-                messagebox.showerror("한국어 TTS", f"백업 실패: {e}")
+                if not quiet:
+                    messagebox.showerror("한국어 TTS", f"백업 실패: {e}")
                 return False
         try:
             with open(path, "wb") as f:
                 f.write(ktts.to_wav_bytes(samples))
         except OSError as e:
-            messagebox.showerror("한국어 TTS", f"저장 실패: {e}")
+            if not quiet:
+                messagebox.showerror("한국어 TTS", f"저장 실패: {e}")
             return False
         return True
 
@@ -1059,6 +1075,73 @@ class App(tk.Tk):
             text=f"'{name}.wav'에서 무음 {cut_ms:.0f}ms를 잘라 저장했습니다 (원본은 {name}.orig 로 보관됨)."
         )
         self._refresh_edit_panel()
+
+    def _normalize_and_trim_all(self):
+        """Whole-voice batch version of 정규화/실제 무음 자르기 above: applies
+        BOTH to EVERY .wav file actually present in this voice's folder
+        (via korean_tts.list_bank_files - not just self.names' walkthrough
+        list, so a '특정 음절 다시 녹음' override recording gets covered
+        too), one file at a time. Real silence is cut FIRST, then loudness
+        is normalized on what's left - same order read_sample() itself
+        already applies at playback time (trim, then normalize), so the
+        target volume is computed from the actual speech, not dragged down
+        by dead air. Same backup-then-overwrite safety net as every other
+        edit here (each file's first-ever backup is kept, so this is safe
+        to run again later - a file that's already normalized and trimmed
+        is simply left untouched). Confirms first since it touches every
+        recording in the voice at once, not just the one selected."""
+        if not hasattr(self, "voice_dir"):
+            return
+        names = sorted(ktts.list_bank_files(self.voice_dir))
+        if not names:
+            messagebox.showinfo("한국어 TTS", "녹음된 파일이 없습니다.")
+            return
+        if not messagebox.askyesno(
+            "한국어 TTS",
+            f"이 목소리의 녹음 파일 {len(names)}개 전체에 실제 무음 자르기와 음량 정규화를 "
+            "적용합니다. 각 파일은 처음 한 번만 <이름>.orig 로 원본이 백업됩니다.\n계속할까요?",
+        ):
+            return
+
+        self.edit_status_label.config(text=f"처리 중... (0/{len(names)})")
+        self.update_idletasks()
+
+        changed = 0
+        unchanged = 0
+        failed = []
+        total_cut_ms = 0.0
+        for i, name in enumerate(names):
+            path = os.path.join(self.voice_dir, name + ".wav")
+            try:
+                raw = ktts.read_sample(path, normalize=False, trim=False)
+            except Exception:
+                failed.append(name)
+                continue
+            trimmed = ktts.trim_silence_smart(array.array("h", raw))
+            processed = ktts.normalize_loudness(trimmed)
+            if processed == raw:
+                unchanged += 1
+                continue
+            if not self._backup_and_overwrite(path, processed, quiet=True):
+                failed.append(name)
+                continue
+            changed += 1
+            total_cut_ms += (len(raw) - len(trimmed)) / ktts.TARGET_RATE * 1000
+            if i % 20 == 0:
+                self.edit_status_label.config(text=f"처리 중... ({i + 1}/{len(names)})")
+                self.update_idletasks()
+
+        summary = f"완료: {len(names)}개 중 {changed}개 변경, {unchanged}개는 이미 적절함"
+        if total_cut_ms:
+            summary += f", 무음 총 {total_cut_ms:.0f}ms 제거"
+        if failed:
+            summary += f". 실패 {len(failed)}개: {', '.join(failed[:10])}" + (" ..." if len(failed) > 10 else "")
+        # _refresh_edit_panel() ends by setting edit_status_label to the
+        # currently-selected file's OWN backup status - call it first so
+        # this summary (the more useful message right after a batch run)
+        # is what's actually left showing, not immediately overwritten.
+        self._refresh_edit_panel()
+        self.edit_status_label.config(text=summary)
 
     def _revert_edit(self):
         if not hasattr(self, "voice_dir") or not self.names:
