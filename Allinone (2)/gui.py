@@ -1027,8 +1027,26 @@ class TuningTab(ttk.Frame):
         self.listbox.config(yscrollcommand=scrollbar.set)
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
 
-        detail = ttk.LabelFrame(body, text="선택한 음성 조각")
-        detail.pack(side="left", fill="y", padx=(8, 0))
+        # Scrollable so every control stays reachable regardless of window
+        # height - this panel grew past a fixed 900x760 window's height once
+        # the crossfade visualization was added (coda/stopgap sliders and
+        # the buttons below them became invisible AND unclickable, since a
+        # plain non-scrolling pack() just clips anything past the bottom
+        # edge silently) - same canvas+scrollbar+inner-frame pattern
+        # voice_recorder.py's settings panel already uses.
+        detail_outer = ttk.LabelFrame(body, text="선택한 음성 조각")
+        detail_outer.pack(side="left", fill="y", padx=(8, 0))
+        detail_canvas = tk.Canvas(detail_outer, highlightthickness=0, width=500)
+        detail_scrollbar = ttk.Scrollbar(detail_outer, orient="vertical", command=detail_canvas.yview)
+        detail_canvas.configure(yscrollcommand=detail_scrollbar.set)
+        detail_canvas.pack(side="left", fill="both", expand=True)
+        detail_scrollbar.pack(side="left", fill="y")
+        detail = ttk.Frame(detail_canvas)
+        detail_canvas.create_window((0, 0), window=detail, anchor="nw")
+        detail.bind("<Configure>", lambda _e: detail_canvas.configure(scrollregion=detail_canvas.bbox("all")))
+        detail_canvas.bind("<Enter>", lambda _e: detail_canvas.bind_all(
+            "<MouseWheel>", lambda ev: detail_canvas.yview_scroll(int(-1 * (ev.delta / 120)), "units")))
+        detail_canvas.bind("<Leave>", lambda _e: detail_canvas.unbind_all("<MouseWheel>"))
 
         self.name_label = ttk.Label(detail, text="(선택 없음)", font=("", 11, "bold"))
         self.name_label.pack(anchor="w", padx=8, pady=8)
