@@ -1037,26 +1037,159 @@ def _resample(samples: array.array, src_rate: int) -> array.array:
 
 MIN_SPEED = 0.5
 MAX_SPEED = 2.0
+SPEED_METHODS = ("resample", "wsola")
+DEFAULT_SPEED_METHOD = "resample"
+
+# WSOLA defaults - see _wsola_time_stretch's docstring for what these
+# control. Frame/tolerance in ms so they scale automatically with
+# TARGET_RATE; kept short (voice-scale, not music-scale) since a shorter
+# frame tracks pitch-period-scale detail better for speech and keeps the
+# search (see _WSOLA_COARSE_STEP/_WSOLA_COARSE_LEN) from getting too slow.
+WSOLA_FRAME_MS = 20.0
+WSOLA_TOLERANCE_MS = 3.0
+# Coarse-search stride (samples) and how much of the overlap the coarse
+# pass scores (samples) - see _wsola_time_stretch's docstring for why a
+# two-stage search exists at all. Not exposed as a public tuning knob
+# (frame_ms/tolerance_ms already cover the parameters worth adjusting per
+# call); these two only affect search cost/precision trade-off, tuned once
+# against measured timing rather than per-voice.
+_WSOLA_COARSE_STEP = 8
+_WSOLA_COARSE_LEN = 64
 
 
-def change_speed(samples: array.array, speed: float) -> array.array:
+def change_speed(samples: array.array, speed: float, method: str = DEFAULT_SPEED_METHOD) -> array.array:
     """Speed up or slow down playback by `speed`x.
 
-    This is the same nearest-neighbour resample as _resample above, just
-    read backwards: telling it the audio's "source rate" was actually
+    `method="resample"` (default, unchanged from before this option
+    existed): the same nearest-neighbour resample as _resample above, just
+    read backwards - telling it the audio's "source rate" was actually
     TARGET_RATE*speed and asking it to resample back down to TARGET_RATE
     drops (speed>1) or repeats (speed<1) samples in exactly the proportion
-    needed to compress or stretch playback time by that factor.
+    needed to compress or stretch playback time by that factor. Pitch
+    shifts with speed as a direct result (like a variable-speed tape).
 
-    Pitch shifts with speed (like a variable-speed tape), since doing
-    proper time-stretching without moving the pitch needs a real DSP
-    library (phase vocoder / WSOLA) - out of scope for a zero-dependency
-    tool. The Android app instead uses AudioTrack's built-in PlaybackParams,
-    which time-stretches without a pitch shift; this is the deliberate
-    trade-off on the Python side for staying dependency-free.
+    `method="wsola"`: keeps pitch roughly constant instead (see
+    _wsola_time_stretch) - meaningfully slower to compute and a bank's own
+    hand-tuned crossfade/coda timings were never validated against
+    speed-shifted audio, but doesn't retune the voice as speed changes.
+
+    The Android app separately gets pitch-preserving speed for free via
+    AudioTrack's built-in PlaybackParams - `method="wsola"` is what makes
+    the equivalent available on the Python/desktop side, which has no such
+    OS-level shortcut and would otherwise need numpy/scipy for a phase
+    vocoder (see IDEAS_NOT_FOR_THIS_PROJECT.md) to get it any other way.
     """
     speed = max(MIN_SPEED, min(MAX_SPEED, speed))
+    if method == "wsola":
+        return _wsola_time_stretch(samples, speed)
     return _resample(samples, max(1, round(TARGET_RATE * speed)))
+
+
+def _wsola_time_stretch(samples: array.array, speed: float, frame_ms: float = WSOLA_FRAME_MS,
+                         tolerance_ms: float = WSOLA_TOLERANCE_MS) -> array.array:
+    """Pitch-preserving time-stretch via WSOLA (waveform similarity
+    overlap-add) - no FFT, no numpy, pure per-sample array work in the same
+    spirit as the rest of this module.
+
+    The idea: place frames of the INPUT into the output at a constant
+    OUTPUT hop (syn_hop), but advance the READ position through the input
+    by a hop scaled by `speed` (ana_hop = syn_hop * speed) - slower than
+    syn_hop for speed<1 (frames overlap more in the input, so the same
+    stretch of input covers MORE output time), faster for speed>1 (frames
+    skip ahead, covering the same input in LESS output time). Because each
+    placed frame is a verbatim, unmodified slice of the original waveform,
+    the pitch (which lives in the fine structure WITHIN a frame) survives;
+    only how often that structure repeats changes, which is what changes
+    duration without changing pitch.
+
+    Naively grabbing the frame at exactly the nominal read position would
+    click/warble wherever the previous frame's end and this frame's start
+    don't line up in phase. So instead, within a small +/-tolerance search
+    window around the nominal position, this picks whichever candidate
+    frame's head has the least summed squared difference against the tail
+    of what's already been placed (the cheapest reasonable stand-in for
+    "which one is most in phase"), then blends that overlap with the exact
+    same equal-power cosine/sine crossfade _crossfade_join already uses
+    elsewhere in this module, appending the frame's un-overlapped remainder
+    verbatim - i.e. this is that same "blend, don't just concatenate" idea,
+    applied to finding WHERE to blend instead of a fixed pair of clips.
+
+    The search itself is coarse-to-fine, not a full scan of every candidate
+    at full precision: a first pass steps through the tolerance window
+    `_WSOLA_COARSE_STEP` samples at a time, scoring each against only the
+    first `_WSOLA_COARSE_LEN` samples of the overlap (a cheap stand-in for
+    "roughly in phase"); a second pass then only checks the handful of
+    candidates immediately around that best coarse guess, this time scoring
+    the FULL overlap for an accurate final pick. Measured (not guessed) via
+    a standalone timing script before picking these constants: a naive full-
+    precision scan at plausible tolerance/frame sizes took tens of seconds
+    per sentence, pure-Python loop throughput being far short of what a
+    numpy-free hand-rolled DSP routine might hope for - coarse-to-fine
+    brings a multi-second clip down to roughly a second or two, which is
+    what makes this usable as an interactive "just try it" mode at all
+    despite having no FFT/numpy to lean on.
+    """
+    n = len(samples)
+    if n == 0 or speed == 1.0:
+        return array.array("h", samples)
+
+    frame_len = max(64, int(TARGET_RATE * frame_ms / 1000))
+    if n <= frame_len:
+        return array.array("h", samples)
+    syn_hop = frame_len // 2
+    overlap_len = frame_len - syn_hop
+    ana_hop = max(1, int(round(syn_hop * speed)))
+    tolerance = max(0, int(TARGET_RATE * tolerance_ms / 1000))
+    coarse_step = max(1, _WSOLA_COARSE_STEP)
+    coarse_len = min(overlap_len, _WSOLA_COARSE_LEN)
+
+    def ssd(a, a_off, b, b_off, length):
+        total = 0
+        for i in range(length):
+            d = a[a_off + i] - b[b_off + i]
+            total += d * d
+        return total
+
+    out = array.array("h", samples[0:frame_len])
+    read_pos = float(ana_hop)
+
+    while True:
+        nominal = int(round(read_pos))
+        if nominal + frame_len > n:
+            break
+        lo = max(0, nominal - tolerance)
+        hi = min(n - frame_len, nominal + tolerance)
+        target_start = len(out) - overlap_len
+
+        coarse_best, coarse_score = nominal, None
+        for cand in range(lo, hi + 1, coarse_step):
+            score = ssd(out, target_start, samples, cand, coarse_len)
+            if coarse_score is None or score < coarse_score:
+                coarse_score = score
+                coarse_best = cand
+
+        fine_lo = max(lo, coarse_best - coarse_step)
+        fine_hi = min(hi, coarse_best + coarse_step)
+        best_off, best_score = coarse_best, None
+        for cand in range(fine_lo, fine_hi + 1):
+            score = ssd(out, target_start, samples, cand, overlap_len)
+            if best_score is None or score < best_score:
+                best_score = score
+                best_off = cand
+
+        frame = samples[best_off:best_off + frame_len]
+        base = len(out) - overlap_len
+        for k in range(overlap_len):
+            t = (k + 1) / (overlap_len + 1)
+            fade_out = math.cos(t * math.pi / 2)
+            fade_in = math.sin(t * math.pi / 2)
+            mixed = out[base + k] * fade_out + frame[k] * fade_in
+            out[base + k] = max(-32768, min(32767, int(mixed)))
+        out.extend(frame[overlap_len:])
+
+        read_pos += ana_hop
+
+    return out
 
 
 def _rms(samples: array.array) -> float:
@@ -1684,7 +1817,8 @@ def _crossfade_join(chunks, kind: str, names=None, overrides=None, audio_setting
 
 def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossfade=True, speed=1.0,
                  stop_gap_ms=DEFAULT_STOP_GAP_MS, overrides=None, audio_settings=None,
-                 hex_pieces=False, naming="hex-codepoint", position_overrides=None):
+                 hex_pieces=False, naming="hex-codepoint", position_overrides=None,
+                 speed_method=DEFAULT_SPEED_METHOD):
     """Concatenate grouped samples (from text_to_groups) into one mono track.
 
     Each group's samples are crossfaded together (see _crossfade_join) rather
@@ -1850,7 +1984,7 @@ def build_audio(groups, sound_dir, gap_ms=300, fade_ms=5, normalize=True, crossf
         prev_stop_gap_ms = group_overrides.get(file_names[-1], {}).get("stop_gap_ms", stop_gap_ms)
 
     if speed != 1.0:
-        track = change_speed(track, speed)
+        track = change_speed(track, speed, method=speed_method)
     return track, missing
 
 
@@ -1859,7 +1993,7 @@ def build_audio_with_fallback(
     gap_ms=300, fade_ms=5, normalize=True, crossfade=True, speed=1.0, stop_gap_ms=None,
     overrides=None, audio_settings=None, naming="hex-codepoint", phonology=None,
     syllable_override_check=None, dedicated_diphthong_check=None, legacy_piece_check=None,
-    hex_pieces=False, position_overrides=None,
+    hex_pieces=False, position_overrides=None, speed_method=DEFAULT_SPEED_METHOD,
 ):
     """Per-character assembly for a bank that has a `fallback_bank`
     configured. Each composed-and-neutralized character is resolved
@@ -1992,7 +2126,7 @@ def build_audio_with_fallback(
             prev_stop_gap_ms = stop_gap_ms
 
     if speed != 1.0:
-        track = change_speed(track, speed)
+        track = change_speed(track, speed, method=speed_method)
     return track, missing, fallback_used
 
 

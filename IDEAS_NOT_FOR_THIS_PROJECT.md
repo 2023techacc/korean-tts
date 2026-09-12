@@ -98,3 +98,94 @@ there"), or if a CI pipeline with a real Android build step + emulator/
 instrumented test existed to catch port drift automatically - without that
 safety net, hand-porting a growing cascade into two more languages is a
 standing invitation for silent divergence.
+
+---
+
+## 3. 구개음화, 사잇소리, and lexical 유음화 exceptions
+
+**Context**: `_parse_and_apply_rules()`'s pronunciation rules (liaison,
+assimilation, tensification, nasalization, etc.) all decide what to do from
+LOCAL jamo context - the current syllable's cho/jung/jong plus its
+immediate neighbor(s), read straight off the composed Hangul text. The
+engine's own header comment (`korean_tts.py`, right above `NASALIZE_STOP`)
+names three well-known standard-pronunciation rules that don't fit that
+model at all, and says so explicitly rather than silently under-handling
+them: **구개음화** (a root-final ㄷ/ㅌ palatalizes to ㅈ/ㅊ before a
+ㅣ-based suffix, e.g. 굳이→구지, 같이→가치, 밭이→바치), **사잇소리** (an
+inserted or tensed consonant at a compound-noun boundary, e.g.
+나무+잎→나뭇잎[나문닙], 손+가락→손까락), and **lexical exceptions to 유음화**
+(의견란→의견난, not the regular 신라→실라 pattern 유음화 would otherwise
+predict for the same ㄴ+ㄹ adjacency).
+
+**Why not to build them here**:
+- 구개음화 only fires across a root+suffix boundary, not within a single
+  morpheme that happens to contain the identical jamo sequence - 굳이
+  (root 굳- + suffix -이) palatalizes to 구지, but 마디 (one indivisible
+  word) does not, even though both are just ㄷ followed by 이. Nothing in
+  the composed Hangul text tells the two cases apart; it requires knowing
+  where a morpheme boundary actually is, which needs a morphological
+  analyzer backed by a dictionary, not another local jamo rule.
+- 사잇소리 and the 유음화 exceptions are worse: both are largely listed per
+  word/compound rather than predictable from sound alone - 나무+잎→나뭇잎
+  inserts a whole extra consonant, 손+등→손등 only tenses the following
+  consonant, plenty of superficially similar compounds insert nothing at
+  all, and 의견란 nasalizes precisely because it's a specific Sino-Korean
+  root, not because anything about its jamo differs from 신라's. Getting
+  these right needs a real dictionary of exceptions, not a rule to encode.
+- All three would need actual Korean NLP tooling (a morphological
+  analyzer/tokenizer with a real lexicon - e.g. what KoNLPy, Kiwi, or
+  MeCab-ko already provide) sitting in front of `_parse_and_apply_rules()`
+  - a fundamentally heavier, different kind of dependency than anything
+  else in this project (pure stdlib, character-level rules only; see the
+  same comment block's note on evaluating and rejecting the `korean_
+  romanizer` PyPI package for related reasons - missing 비음화, actively
+  wrong 구개음화). It would also only matter for correctly reading
+  arbitrary free text; a bank built around specific target sentences can
+  already reach for `syllable_overrides` to force the right pronunciation
+  for the handful of words that actually need it.
+
+**Where this WOULD make sense**: a general-purpose Korean text-to-
+pronunciation front end built on an existing morphological analyzer
+(KoNLPy/Kiwi/MeCab-ko or similar - already solved, well-tested problems in
+that ecosystem), feeding its output INTO this project's existing
+`text_to_pronunciation`/`_parse_and_apply_rules` pipeline (which would
+still own turning the corrected jamo sequence into piece lookups) rather
+than reimplementing morphology/lexicon lookups from scratch here.
+
+---
+
+## 4. Phase-vocoder time-stretching (the other pitch-preserving speed option)
+
+**Context**: `korean_tts.change_speed()` offers two speed-change methods -
+the original `"resample"` (fast, pitch shifts with speed) and a hand-rolled
+`"wsola"` (waveform similarity overlap-add, keeps pitch roughly constant by
+re-using verbatim, phase-aligned slices of the original waveform at a
+different rate - see `_wsola_time_stretch`'s docstring). A phase vocoder is
+the OTHER classic way to get pitch-preserving time-stretch, and works
+completely differently: it takes the input's short-time Fourier transform
+(STFT), stretches time by resampling the sequence of FFT frames themselves
+while correcting each frame's phase so bins stay coherent frame-to-frame,
+then inverse-transforms back to a time-domain signal at the new duration.
+
+**Why not to build it here**: it needs a real FFT, at real speed, applied
+to overlapping windows across the whole clip. This project already
+weighed and rejected numpy/scipy as a dependency (see idea #1 above, and
+`AudioSettings`/the rest of this codebase's pure-`array`-module DSP) - a
+phase vocoder is the clearest case yet for why: a naive pure-Python DFT is
+O(n²) per frame, and even a hand-rolled radix-2 FFT (the standard fix,
+itself real effort to write and validate correctly) is meaningfully more
+code and more failure surface than WSOLA's time-domain "reuse and cross-
+fade" approach for the same result at this project's scale (short spoken
+sentences, not music or long-form audio with wide stretch ratios). WSOLA
+also degrades more gracefully for speech specifically - a phase vocoder is
+generally the better choice for LARGE stretch ratios or independent pitch
+shifting (changing pitch without changing speed, which WSOLA can't do at
+all), neither of which this project's speed slider (0.5x-2.0x, tied
+one-to-one with speed) needs.
+
+**Where this WOULD make sense**: a project already depending on numpy/
+scipy (or willing to), wanting either a wider/more extreme stretch range,
+independent pitch-shifting as its own feature, or higher audio fidelity at
+large stretch factors than a time-domain method like WSOLA can deliver -
+none of which apply to this project's use case of modestly speeding up or
+slowing down short TTS output.

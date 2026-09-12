@@ -122,7 +122,7 @@ class Player:
 
 DEFAULT_SETTINGS = {
     "speed": 1.0, "gap_ms": 300, "volume": 1.0, "stop_gap_ms": ktts.DEFAULT_STOP_GAP_MS,
-    "voice": ktts.DEFAULT_VOICE,
+    "voice": ktts.DEFAULT_VOICE, "speed_method": ktts.DEFAULT_SPEED_METHOD,
 }
 
 
@@ -297,6 +297,30 @@ class MainTab(ttk.Frame):
         s = self.app.settings
         self.speed_var = self._add_slider(sliders, "재생 속도", s["speed"], ktts.MIN_SPEED, ktts.MAX_SPEED,
                                            fmt=lambda v: f"{v:.2f}x", key="speed")
+
+        speed_method_row = ttk.Frame(sliders)
+        speed_method_row.pack(fill="x", padx=8, pady=4)
+        ttk.Label(speed_method_row, text="속도 변경 방식", width=26).pack(side="left")
+        self._speed_method_labels = {
+            "resample": "일반 (빠름, 음높이도 변함)",
+            "wsola": "음높이 유지 (WSOLA, 느릴 수 있음)",
+        }
+        self._speed_method_values = {v: k for k, v in self._speed_method_labels.items()}
+        self.speed_method_var = tk.StringVar(
+            value=self._speed_method_labels.get(s["speed_method"], self._speed_method_labels["resample"])
+        )
+        speed_method_combo = ttk.Combobox(
+            speed_method_row, textvariable=self.speed_method_var, state="readonly",
+            values=list(self._speed_method_labels.values()), width=32,
+        )
+        speed_method_combo.pack(side="left", padx=8)
+        speed_method_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _evt: self.app.settings.__setitem__(
+                "speed_method", self._speed_method_values[self.speed_method_var.get()]
+            ),
+        )
+
         self.gap_var = self._add_slider(sliders, "띄어쓰기 간격", s["gap_ms"], 0, 800,
                                          fmt=lambda v: f"{int(v)}ms", key="gap_ms")
         self.volume_var = self._add_slider(sliders, "볼륨", s["volume"] * 100, 0, 100,
@@ -351,6 +375,7 @@ class MainTab(ttk.Frame):
             gap_ms=int(self.app.settings["gap_ms"]),
             stop_gap_ms=int(self.app.settings["stop_gap_ms"]),
             speed=self.app.settings["speed"],
+            speed_method=self.app.settings["speed_method"],
             overrides=self.app.overrides,
             position_overrides=position_overrides,
         )
