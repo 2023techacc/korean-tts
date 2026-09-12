@@ -36,6 +36,12 @@ else:
     RESOURCE_DIR = BASE_DIR
     WRITABLE_DIR = BASE_DIR
 
+# Not a true constant once running: App.reload_sound_from_disk() can
+# reassign this (via `global SOUND_ROOT`) to WRITABLE_DIR's own sound/ -
+# the live folder VoiceRecorder.exe actually edits - so an already-running
+# packaged exe can pick up those edits without a full rebuild. Every
+# reader below looks this name up at call time, not at import time, so
+# that reassignment takes effect everywhere without further changes.
 SOUND_ROOT = os.path.join(RESOURCE_DIR, "sound")
 OVERRIDES_DIR = os.path.join(WRITABLE_DIR, ktts.OVERRIDES_SUBDIR)
 ktts.migrate_legacy_overrides(WRITABLE_DIR, OVERRIDES_DIR)
@@ -210,6 +216,41 @@ class App(tk.Tk):
         self.overrides = ktts.load_overrides(self.overrides_path())
         self.tuning_tab.on_voice_changed()
 
+    def reload_sound_from_disk(self) -> None:
+        """Re-point SOUND_ROOT at the real, live sound/ folder next to the
+        .exe (WRITABLE_DIR) instead of the frozen snapshot PyInstaller baked
+        into the exe at build time (RESOURCE_DIR, from sys._MEIPASS once
+        packaged - see the module-level comment above SOUND_ROOT). Lets an
+        already-running KoreanTTS.exe pick up edits made in VoiceRecorder.
+        exe - which always writes straight to that same live folder -
+        without a full PyInstaller rebuild. A no-op with an explanatory
+        message when there's nothing to switch to: already running
+        unpackaged (`py gui.py`, where SOUND_ROOT is already that live
+        folder), or a packaged exe with no sound/ folder actually sitting
+        next to it (a plain end-user install with only the bundled copy).
+        Never touches self.overrides - that's loaded from WRITABLE_DIR
+        (already live either way) and may hold in-memory tuning changes
+        not yet written to disk via '모든 변경사항 저장'.
+        """
+        global SOUND_ROOT
+        live_dir = os.path.join(WRITABLE_DIR, "sound")
+        if os.path.normcase(os.path.abspath(live_dir)) == os.path.normcase(os.path.abspath(SOUND_ROOT)):
+            messagebox.showinfo("한국어 TTS", "이미 실시간 폴더에서 불러오고 있습니다 (더 새로고침할 것이 없음).")
+            return
+        if not os.path.isdir(live_dir):
+            messagebox.showinfo(
+                "한국어 TTS", f"실행 파일 옆에 sound 폴더가 없어 새로고침할 것이 없습니다:\n{live_dir}"
+            )
+            return
+
+        SOUND_ROOT = live_dir
+        if self.settings["voice"] not in ktts.list_voices(SOUND_ROOT):
+            self.settings["voice"] = ktts.DEFAULT_VOICE
+        self.main_tab.voice_combo["values"] = ktts.list_voices(SOUND_ROOT)
+        self.main_tab.voice_var.set(self.settings["voice"])
+        self.tuning_tab.on_voice_changed()
+        messagebox.showinfo("한국어 TTS", f"실시간 폴더에서 다시 불러왔습니다:\n{live_dir}")
+
     def _on_close(self):
         self.player.stop()
         save_settings(self.settings)
@@ -250,6 +291,8 @@ class MainTab(ttk.Frame):
                                          values=ktts.list_voices(SOUND_ROOT))
         self.voice_combo.pack(side="left", fill="x", expand=True, padx=8)
         self.voice_combo.bind("<<ComboboxSelected>>", lambda _evt: self.app.set_voice(self.voice_var.get()))
+        ttk.Button(voice_row, text="새로고침 (디스크에서 다시 불러오기)",
+                   command=self.app.reload_sound_from_disk).pack(side="left")
 
         s = self.app.settings
         self.speed_var = self._add_slider(sliders, "재생 속도", s["speed"], ktts.MIN_SPEED, ktts.MAX_SPEED,
@@ -1000,6 +1043,7 @@ class TuningTab(ttk.Frame):
         ttk.Entry(top, textvariable=self.search_var).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(top, text="내보내기...", command=self._export).pack(side="left", padx=(8, 0))
         ttk.Button(top, text="가져오기...", command=self._import).pack(side="left", padx=(4, 0))
+        ttk.Button(top, text="전체 초기화...", command=self._reset_all).pack(side="left", padx=(4, 0))
 
         # Whole-voice settings (bank.json's "audio" block) - unlike every
         # other slider in this tab, these apply to ALL of this voice's
@@ -1364,6 +1408,34 @@ class TuningTab(ttk.Frame):
         self.app.overrides.pop(self.current_name, None)
         self._refresh_list()
         self._refresh_join_viz()
+
+    def _reset_all(self):
+        """Batch version of 초기화: clears EVERY per-sample override for the
+        CURRENT voice at once, not just the selected one - e.g. after
+        VoiceRecorder.exe's whole-voice 정규화/무음 자르기 fixes the
+        underlying audio itself, old manual overrides tuned against the
+        pre-fix files may no longer make sense and are easiest to just
+        start over from. Confirms first (shows how many will be cleared)
+        since this can erase a lot of tuning work in one click. Like every
+        other edit in this tab, only the in-memory dict is cleared -
+        nothing is written to sound_overrides.json until '모든 변경사항
+        저장', so this is safe to undo by simply not saving (or by
+        reloading the voice, which re-reads the file untouched)."""
+        count = len(self.app.overrides)
+        if not count:
+            messagebox.showinfo("한국어 TTS", "초기화할 조정이 없습니다.")
+            return
+        if not messagebox.askyesno(
+            "한국어 TTS",
+            f"이 목소리({self.app.settings['voice']})의 조각별 조정 {count}개를 모두 초기화합니다.\n"
+            "'모든 변경사항 저장'을 눌러야 실제 파일에 반영됩니다. 계속할까요?",
+        ):
+            return
+        self.app.overrides.clear()
+        self._refresh_list()
+        if self.current_name:
+            self._on_select_by_name(self.current_name)
+        self.status_label.config(text=f"{count}개 조정을 초기화했습니다 (저장하려면 '모든 변경사항 저장').")
 
     def _preview(self):
         if not self.current_name:
