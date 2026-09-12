@@ -8,6 +8,7 @@ phonology or audio pipeline, only the UI and the fine-tuning overrides file
 that pipeline already knows how to consume (see korean_tts.load_overrides).
 """
 
+import array
 import io
 import json
 import os
@@ -493,10 +494,53 @@ class MainTab(ttk.Frame):
                 child.destroy()
             piece_vars.clear()
 
-            _kind, names = real_groups[i]
+            kind, names = real_groups[i]
             file_names = [ktts.piece_filename(n, hex_pieces, naming) for n in names]
             stored = self.position_overrides.get(i) or []
             multi = len(names) > 1
+            join_viz_widgets = {}  # join index (piece idx > 0) -> its CrossfadeVisualizer
+
+            def effective_chunk(j):
+                """This piece's samples exactly as real synthesis would use
+                them right now: raw + its current (live, maybe-unsaved)
+                gain/trim, then coda-shortened if it's a bare sonorant tail
+                past the first piece - same preprocessing build_audio()
+                applies before ever handing chunks to _crossfade_join."""
+                st = piece_vars[j]
+                raw = load_piece_raw(st["file_name"])
+                if raw is None:
+                    return array.array("h")
+                chunk = ktts.apply_override(array.array("h", raw), {
+                    "gain_db": st["gain_var"].get(),
+                    "trim_start_ms": st["trim_start_var"].get(),
+                    "trim_end_ms": st["trim_end_var"].get(),
+                })
+                if j > 0 and st["name"] in ktts.CODA_TAILS:
+                    coda_enabled = st["coda_enabled"]
+                    coda_ms = (st["coda_var"].get() if coda_enabled is not None and coda_enabled.get()
+                               else st["baseline"]["coda_ms"])
+                    chunk = ktts._shorten_coda(chunk, max_ms=coda_ms, fade_ms=audio_settings.coda_tail_fade_ms)
+                return chunk
+
+            def refresh_viz(j):
+                """Redraw the join-j visualizer (between piece j-1 and j),
+                if this position even has one at that index."""
+                widget = join_viz_widgets.get(j)
+                if widget is None:
+                    return
+                chunk_a, chunk_b = effective_chunk(j - 1), effective_chunk(j)
+                if not len(chunk_a) or not len(chunk_b):
+                    widget.clear()
+                    return
+                cf_enabled = piece_vars[j]["crossfade_enabled"]
+                override_ms = int(piece_vars[j]["crossfade_var"].get()) \
+                    if cf_enabled is not None and cf_enabled.get() else None
+                combined = ktts._crossfade_join(
+                    [chunk_a, chunk_b], kind, [piece_vars[j - 1]["file_name"], piece_vars[j]["file_name"]],
+                    {piece_vars[j]["file_name"]: {"crossfade_ms": override_ms}} if override_ms is not None else {},
+                    audio_settings=audio_settings,
+                )
+                _render_crossfade_join(widget, chunk_a, chunk_b, combined)
 
             for idx, (name, file_name) in enumerate(zip(names, file_names)):
                 piece_override = stored[idx] if idx < len(stored) and stored[idx] else {}
@@ -532,6 +576,18 @@ class MainTab(ttk.Frame):
                 trim_start_text = tk.StringVar()
                 trim_end_text = tk.StringVar()
 
+                # Registered now (crossfade/coda refs filled in below once
+                # built) so the join-visualizer for THIS piece's join can
+                # already see the PREVIOUS piece's finalized state, and a
+                # later piece's join-visualizer can see this one.
+                piece_state = {
+                    "name": name, "file_name": file_name, "baseline": baseline,
+                    "gain_var": gain_var, "trim_start_var": trim_start_var, "trim_end_var": trim_end_var,
+                    "crossfade_enabled": None, "crossfade_var": None,
+                    "coda_enabled": None, "coda_var": None,
+                }
+                piece_vars.append(piece_state)
+
                 ttk.Label(frame, text="파형 (드래그해서 자르기 구간 조절 - 지금 이 위치에 설정된 그대로)",
                           foreground="#888").pack(anchor="w", padx=4)
                 waveform = WaveformEditor(frame, on_drag=lambda s, e: None)
@@ -543,12 +599,16 @@ class MainTab(ttk.Frame):
                     waveform.redraw()
 
                 def sync(_evt=None, gv=gain_var, gt=gain_text, sv=trim_start_var, st=trim_start_text,
-                         ev=trim_end_var, et=trim_end_text, wf=waveform):
+                         ev=trim_end_var, et=trim_end_text, wf=waveform, idx=idx):
                     gt.set(f"음량 보정: {gv.get():+.1f}dB")
                     st.set(f"시작 자르기: {int(sv.get())}ms")
                     et.set(f"끝 자르기: {int(ev.get())}ms")
                     wf.set_trim(sv.get(), ev.get())
                     commit()
+                    # This piece's gain/trim feeds into both the join right
+                    # before it and the join right after it.
+                    refresh_viz(idx)
+                    refresh_viz(idx + 1)
 
                 def on_drag(start_ms, end_ms, sv=trim_start_var, ev=trim_end_var, s=sync):
                     sv.set(round(start_ms))
@@ -578,7 +638,6 @@ class MainTab(ttk.Frame):
                 ttk.Scale(frame, from_=0, to=trim_hi, orient="horizontal", variable=trim_end_var,
                           command=sync).pack(fill="x", padx=4, pady=(0, 4))
 
-                crossfade_enabled = crossfade_var = coda_enabled = coda_var = None
                 if idx > 0:
                     # Only a non-first piece is ever consulted for the join
                     # right before it (see korean_tts._crossfade_join: the
@@ -592,19 +651,27 @@ class MainTab(ttk.Frame):
                     cf_value = piece_override.get("crossfade_ms", baseline["crossfade_ms"])
                     crossfade_enabled = tk.BooleanVar(value=cf_checked)
                     crossfade_var = tk.DoubleVar(value=cf_value)
-                    add_optional_row(frame, "앞 조각과 교차 길이", crossfade_enabled, crossfade_var, 0, 200, commit)
+                    add_optional_row(frame, "앞 조각과 교차 길이", crossfade_enabled, crossfade_var, 0, 200,
+                                      lambda idx=idx: (commit(), refresh_viz(idx)))
+                    piece_state["crossfade_enabled"] = crossfade_enabled
+                    piece_state["crossfade_var"] = crossfade_var
+
                     if name in ktts.CODA_TAILS:
                         coda_checked = ("coda_max_ms" in piece_override) or baseline["coda_present"]
                         coda_value = piece_override.get("coda_max_ms", baseline["coda_ms"])
                         coda_enabled = tk.BooleanVar(value=coda_checked)
                         coda_var = tk.DoubleVar(value=coda_value)
-                        add_optional_row(frame, "받침 유지 길이", coda_enabled, coda_var, 0, 300, commit)
+                        add_optional_row(frame, "받침 유지 길이", coda_enabled, coda_var, 0, 300,
+                                          lambda idx=idx: (commit(), refresh_viz(idx)))
+                        piece_state["coda_enabled"] = coda_enabled
+                        piece_state["coda_var"] = coda_var
 
-                piece_vars.append({
-                    "gain_var": gain_var, "trim_start_var": trim_start_var, "trim_end_var": trim_end_var,
-                    "crossfade_enabled": crossfade_enabled, "crossfade_var": crossfade_var,
-                    "coda_enabled": coda_enabled, "coda_var": coda_var, "baseline": baseline,
-                })
+                    ttk.Label(frame, text="교차 시각화 (앞 조각과의 실제 결과)",
+                              foreground="#888").pack(anchor="w", padx=4, pady=(6, 0))
+                    join_viz = CrossfadeVisualizer(frame)
+                    join_viz.pack(padx=4, pady=(0, 4))
+                    join_viz_widgets[idx] = join_viz
+                    refresh_viz(idx)
 
             # The stop-gap control is position-level (only the LAST piece's
             # value is ever consulted - see build_audio()), so its baseline
@@ -817,6 +884,93 @@ class WaveformEditor(tk.Canvas):
         self.on_drag(self.trim_start_ms, self.trim_end_ms)
 
 
+class CrossfadeVisualizer(tk.Canvas):
+    """Read-only, zoomed-in view of one crossfade join: the REAL blended
+    output (via korean_tts._crossfade_join, the exact function real
+    synthesis uses) around the join boundary, with the overlap band
+    shaded - so what's drawn is byte-for-byte what would actually play,
+    not an abstract diagram. A thin margin of each side's still-unfaded
+    audio is included around the shaded band for context.
+    """
+
+    WIDTH = 420
+    HEIGHT = 80
+
+    def __init__(self, parent):
+        super().__init__(parent, width=self.WIDTH, height=self.HEIGHT, background="#1e1e1e",
+                          highlightthickness=1, highlightbackground="#888")
+        self.peaks = []
+        self.overlap_start_frac = 0.0
+        self.overlap_end_frac = 0.0
+        self.overlap_ms = 0.0
+        self.redraw()
+
+    def set_data(self, window_samples, overlap_start_ms, overlap_end_ms, window_duration_ms):
+        n = len(window_samples)
+        width = self.WIDTH
+        peaks = []
+        for x in range(width):
+            start = n * x // width
+            end = max(start + 1, n * (x + 1) // width)
+            chunk = window_samples[start:end]
+            peaks.append(max((abs(v) for v in chunk), default=0))
+        self.peaks = peaks
+        self.overlap_start_frac = (overlap_start_ms / window_duration_ms) if window_duration_ms else 0.0
+        self.overlap_end_frac = (overlap_end_ms / window_duration_ms) if window_duration_ms else 0.0
+        self.overlap_ms = max(0.0, overlap_end_ms - overlap_start_ms)
+        self.redraw()
+
+    def clear(self, message="(교차 없음)"):
+        self.peaks = []
+        self._empty_message = message
+        self.redraw()
+
+    def redraw(self):
+        self.delete("all")
+        if not self.peaks:
+            self.create_text(self.WIDTH // 2, self.HEIGHT // 2,
+                              text=getattr(self, "_empty_message", "(선택 없음)"), fill="#888")
+            return
+
+        px_start = max(0, min(self.WIDTH, self.overlap_start_frac * self.WIDTH))
+        px_end = max(0, min(self.WIDTH, self.overlap_end_frac * self.WIDTH))
+        self.create_rectangle(px_start, 0, px_end, self.HEIGHT, fill="#2e2e55", outline="")
+
+        mid = self.HEIGHT // 2
+        scale = (self.HEIGHT / 2 - 4) / 32768
+        for x, peak in enumerate(self.peaks):
+            h = peak * scale
+            self.create_line(x, mid - h, x, mid + h, fill="#6fcf97")
+
+        self.create_line(px_start, 0, px_start, self.HEIGHT, fill="#8c8cff", width=1)
+        self.create_line(px_end, 0, px_end, self.HEIGHT, fill="#8c8cff", width=1)
+        self.create_text(self.WIDTH // 2, 10, text=f"교차 구간 {int(self.overlap_ms)}ms", fill="#cfe8ff")
+
+
+def _render_crossfade_join(widget: CrossfadeVisualizer, chunk_a: array.array, chunk_b: array.array,
+                            combined: array.array):
+    """Feed a CrossfadeVisualizer the real output of joining chunk_a+chunk_b
+    (as korean_tts._crossfade_join actually produced it, in `combined`) -
+    zoomed to the overlap with a little context on each side. `combined`'s
+    length is len(chunk_a)+len(chunk_b) minus however much they overlapped,
+    which is all that's needed to locate the join without re-deriving the
+    crossfade math here.
+    """
+    overlap = max(0, len(chunk_a) + len(chunk_b) - len(combined))
+    join_index = len(chunk_a) - overlap
+    margin = max(overlap // 2, int(ktts.TARGET_RATE * 30 / 1000))
+    win_start = max(0, join_index - margin)
+    win_end = min(len(combined), join_index + overlap + margin)
+    window = combined[win_start:win_end]
+    if not len(window):
+        widget.clear()
+        return
+    window_duration_ms = len(window) / ktts.TARGET_RATE * 1000
+    overlap_start_ms = (join_index - win_start) / ktts.TARGET_RATE * 1000
+    overlap_end_ms = overlap_start_ms + (overlap / ktts.TARGET_RATE * 1000)
+    widget.set_data(window, overlap_start_ms, overlap_end_ms, window_duration_ms)
+
+
 class TuningTab(ttk.Frame):
     """Per-sample overrides, layered on top of the automatic trim+normalize
     pipeline (see korean_tts.apply_override / build_audio). Saved to
@@ -917,6 +1071,11 @@ class TuningTab(ttk.Frame):
             adv, "교차 길이(ms) - 다음/이전 조각과의 겹침",
             self.crossfade_enabled, self.crossfade_var, 0, 200, self._commit)
 
+        ttk.Label(adv, text="교차 시각화 - 이 조각을 다른 조각 뒤에 이어붙였을 때 (실제 결과)",
+                  foreground="#888").pack(anchor="w", padx=4, pady=(4, 0))
+        self.join_viz = CrossfadeVisualizer(adv)
+        self.join_viz.pack(padx=4, pady=(0, 4))
+
         self.coda_enabled = tk.BooleanVar(value=False)
         self.coda_var = tk.DoubleVar(value=ktts.CODA_MAX_MS)
         self._add_optional_slider(adv, "받침 길이(ms) - ㄴㄹㅁㅇ 전용",
@@ -1004,6 +1163,7 @@ class TuningTab(ttk.Frame):
         self.voice_label.config(text=f"목소리: {self.app.settings['voice']}")
         self.waveform.peaks = []
         self.waveform.redraw()
+        self.join_viz.clear()
         self.all_names = self._list_sound_files()
         self._rebuild_search_keys()
         self._refresh_list()
@@ -1056,6 +1216,8 @@ class TuningTab(ttk.Frame):
             self.waveform.peaks = []
             self.waveform.redraw()
 
+        self._refresh_join_viz()
+
     def _on_waveform_drag(self, start_ms, end_ms):
         self.trim_start_var.set(round(start_ms))
         self.trim_end_var.set(round(end_ms))
@@ -1094,6 +1256,38 @@ class TuningTab(ttk.Frame):
             self.app.overrides[self.current_name] = override
         else:
             self.app.overrides.pop(self.current_name, None)
+        self._refresh_join_viz()
+
+    def _refresh_join_viz(self):
+        """Redraw self.join_viz with the REAL result of joining this
+        sample after some other piece in the bank (same synthetic pairing
+        _preview_join_timing() plays), using this sample's current
+        (unsaved) gain/trim/crossfade sliders - so the visualization always
+        reflects what you'd hear if you previewed right now, live as you
+        drag any of those sliders."""
+        if not self.current_name or not self.all_names:
+            self.join_viz.clear()
+            return
+        name = self.current_name
+        filler = next((n for n in self.all_names if n != name), None)
+        if filler is None:
+            self.join_viz.clear("(비교할 다른 조각 없음)")
+            return
+        filler_raw = self._load_raw(filler)
+        name_raw = self._load_raw(name)
+        if filler_raw is None or name_raw is None:
+            self.join_viz.clear("(파일 없음)")
+            return
+        override = self._current_override()
+        chunk_a = array.array("h", filler_raw)
+        chunk_b = ktts.apply_override(array.array("h", name_raw), override)
+        override_ms = override.get("crossfade_ms")
+        combined = ktts._crossfade_join(
+            [chunk_a, chunk_b], "coda", [filler, name],
+            {name: {"crossfade_ms": override_ms}} if override_ms is not None else {},
+            audio_settings=self.app.audio_settings(),
+        )
+        _render_crossfade_join(self.join_viz, chunk_a, chunk_b, combined)
 
     def _on_gain_change(self, _v):
         self._sync_labels()
@@ -1151,6 +1345,7 @@ class TuningTab(ttk.Frame):
         self.waveform.set_trim(0.0, 0.0)
         self.app.overrides.pop(self.current_name, None)
         self._refresh_list()
+        self._refresh_join_viz()
 
     def _preview(self):
         if not self.current_name:
